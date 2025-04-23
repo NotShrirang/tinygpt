@@ -18,9 +18,9 @@ def load_model():
 model, tokenizer = load_model()
 
 
-def generate_text(model, input_tokens, max_new_tokens=100, temperature=0.8, top_k=50, top_p=0.95):
+def generate_text(model, input_tokens, max_new_tokens=100, temperature=0.8, top_k=50, top_p=0.95, word_repetition_penalty=1.0):
     """Generate text using the model and input tokens."""
-    for idx_next in generate(model, input_tokens, max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p):
+    for idx_next in generate(model, input_tokens, max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p, word_repetition_penalty=word_repetition_penalty):
         last_token = idx_next[:, -1]
         decoded_token = tokenizer.decode(last_token.tolist())
         if last_token.item() == tokenizer.eos_id:
@@ -32,6 +32,16 @@ def generate_text(model, input_tokens, max_new_tokens=100, temperature=0.8, top_
 st.title("TinyGPT :robot_face:")
 st.text("A 50M parameter GPT model trained on a dataset of tiny stories.")
 
+with st.sidebar:
+    st.header("Settings")
+    st.text("Adjust the generation settings below:")
+    temperature = st.slider("Temperature", min_value=0.01, max_value=1.0, value=0.6, step=0.1)
+    top_k = st.slider("Top K", min_value=0, max_value=100, value=50, step=1)
+    top_p = st.slider("Top P", min_value=0.0, max_value=1.0, value=0.95, step=0.01)
+    max_new_tokens = st.slider("Max New Tokens", min_value=20, max_value=500, value=100, step=20)
+    st.info("Note: Adjusting these settings can affect the creativity and coherence of the generated text.")
+
+
 user_input = st.chat_input(placeholder="Type your message here...")
 
 if user_input:
@@ -41,7 +51,7 @@ if user_input:
     with st.chat_message("user"):
         st.write(user_input)
 
-    generated_text = generate_text(model, input_tokens, 100, temperature=0.8, top_k=50, top_p=0.95)
+    generated_text = generate_text(model, input_tokens, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p)
 
     with st.chat_message("ai"):
         st.markdown("**TinyGPT is typing...**")

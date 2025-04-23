@@ -12,7 +12,7 @@ def generate_square_subsequent_mask(sz):
     mask = torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
     return mask
 
-def generate(model, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.7, top_k: int = 50, top_p: float = 0.95):
+def generate(model, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.7, top_k: int = 50, top_p: float = 0.95, word_repetition_penalty: float = 1.0):
     """
     Generate new tokens from the model given an initial sequence of indices 'idx'.
     The generation continues for 'max_new_tokens' steps.
@@ -24,6 +24,7 @@ def generate(model, idx: torch.Tensor, max_new_tokens: int, temperature: float =
         temperature: Controls randomness in sampling. Lower means more deterministic.
         top_k: If > 0, only sample from the top k most likely tokens
         top_p: If < 1.0, only sample from the smallest set of tokens whose cumulative probability exceeds p
+        word_repetition_penalty: Penalty for repeating words in the generated text
     
     Yields:
         torch.Tensor: Each newly generated token as it's produced
@@ -31,6 +32,8 @@ def generate(model, idx: torch.Tensor, max_new_tokens: int, temperature: float =
     model.eval()
     
     generated_tokens = idx.clone()
+
+    eps = 1e-6
     
     with torch.no_grad():
         for _ in range(max_new_tokens):
@@ -38,8 +41,14 @@ def generate(model, idx: torch.Tensor, max_new_tokens: int, temperature: float =
             logits, _ = model(seq)
             logits = logits[:, -1, :]
 
+            if word_repetition_penalty != 1.0:
+                for batch_idx in range(generated_tokens.shape[0]):
+                    for token_idx in torch.unique(generated_tokens[batch_idx]):
+                        if token_idx >= 0:
+                            logits[batch_idx, token_idx] = logits[batch_idx, token_idx] / word_repetition_penalty
+
             if temperature > 0:
-                logits = logits / temperature
+                logits = logits / (temperature + eps)
 
             if top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
