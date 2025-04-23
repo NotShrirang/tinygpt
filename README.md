@@ -8,6 +8,8 @@ TinyGPT is a compact 50M parameter GPT model trained on a dataset of tiny storie
 
 HuggingFace Repository: https://huggingface.co/NotShrirang/tinygpt
 
+Hosted Streamlit Application: https://tinygpt.streamlit.app/
+
 ## Overview 🔍
 
 TinyGPT is a lightweight GPT implementation trained on a dataset of short stories. With 50M parameters, it strikes a balance between computational efficiency and generative capability. The model was trained using a transformer architecture with self-attention mechanisms to capture contextual relationships in text.
