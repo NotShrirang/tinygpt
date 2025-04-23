@@ -4,6 +4,7 @@ from tinygpt.model import GPTLanguageModel
 from tinygpt.tokenizer import Tokenizer
 from tinygpt.utils import generate
 import torch
+import requests
 
 
 st.set_page_config(page_title="TinyGPT", page_icon=":robot_face:", layout="wide")
@@ -15,8 +16,20 @@ def load_model():
     tokenizer = Tokenizer()
     return model, tokenizer
 
-model, tokenizer = load_model()
-
+try:
+    model, tokenizer = load_model()
+except Exception as e:
+    with st.spinner("Downloading model..."):
+        st.info("Model weights not found. Downloading from Hugging Face...")
+        url = "https://huggingface.co/NotShrirang/tinygpt/resolve/main/final_model_tiny_stories_tiktoken_best22042025_1_weights.pt"
+        local_filename = "./tinygpt/weights/final_model_tiny_stories_tiktoken_best22042025_1_weights.pt"
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
+            with open(local_filename, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        st.success("Model downloaded successfully!")
+        model, tokenizer = load_model()
 
 def generate_text(model, input_tokens, max_new_tokens=100, temperature=0.8, top_k=50, top_p=0.95, word_repetition_penalty=1.0):
     """Generate text using the model and input tokens."""
