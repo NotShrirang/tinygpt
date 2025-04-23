@@ -6,8 +6,7 @@
 
 TinyGPT is a compact 50M parameter GPT model trained on a dataset of tiny stories, designed to generate coherent and creative text based on user input. ✨
 
-## Features:
-
+HuggingFace Repository: https://huggingface.co/NotShrirang/tinygpt
 
 ## Overview 🔍
 
