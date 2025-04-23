@@ -1,10 +1,11 @@
+import requests
 import streamlit as st
+import torch
+import time
 
 from tinygpt.model import GPTLanguageModel
 from tinygpt.tokenizer import Tokenizer
 from tinygpt.utils import generate
-import torch
-import requests
 
 
 st.set_page_config(page_title="TinyGPT", page_icon=":robot_face:", layout="wide")
@@ -38,7 +39,6 @@ def generate_text(model, input_tokens, max_new_tokens=100, temperature=0.8, top_
         decoded_token = tokenizer.decode(last_token.tolist())
         if last_token.item() == tokenizer.eos_id:
             break
-
         yield decoded_token
 
 
@@ -68,4 +68,9 @@ if user_input:
 
     with st.chat_message("ai"):
         st.markdown("**TinyGPT is typing...**")
-        st.write_stream(generated_text)
+        start_time = time.time()
+        text = st.write_stream(generated_text)
+        end_time = time.time()
+        tokens = tokenizer.encode(text, bos=False, eos=False)
+        elapsed_time = end_time - start_time
+        st.success(f"Finished generating **{len(tokens)}** tokens in **{elapsed_time:.2f} seconds**! **{len(tokens) / elapsed_time:.2f} tokens/s**")
