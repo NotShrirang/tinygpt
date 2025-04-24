@@ -1,3 +1,6 @@
+<img src="https://github.com/user-attachments/assets/8a90d976-57cb-4e3b-a9e7-33e37816eb81" alt="TinyGPT Banner" />
+
+
 # TinyGPT 🤖
 
 [![GitHub stars](https://img.shields.io/github/stars/NotShrirang/tinygpt?style=social)](https://github.com/NotShrirang/tinygpt/stargazers)
