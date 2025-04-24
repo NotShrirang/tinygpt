@@ -12,7 +12,7 @@ Hosted Streamlit Application: https://tinygpt.streamlit.app/
 
 ## Overview 🔍
 
-TinyGPT is a lightweight GPT implementation trained on a dataset of short stories. With 50M parameters, it strikes a balance between computational efficiency and generative capability. The model was trained using a transformer architecture with self-attention mechanisms to capture contextual relationships in text.
+TinyGPT is a lightweight GPT implementation trained on a comprehensive dataset of short stories. With 50M parameters, it strikes a balance between computational efficiency and generative capability. The model was trained using a transformer architecture with self-attention mechanisms to capture contextual relationships in text.
 
 ## Model Architecture 🏗️
 
@@ -27,6 +27,11 @@ TinyGPT uses a standard GPT decoder-only transformer architecture with:
 ## Dataset 📖
 
 The model was trained on the TinyStories dataset, a collection of short stories designed for training language models. This dataset provides simple narratives that help the model learn coherent story generation while maintaining a smaller size compared to larger language models.
+
+### Training Data Improvements 📈
+
+- **Scale**: TinyGPT was trained on approximately 300M tokens, significantly enhancing its language understanding capabilities.
+- **Data Processing**: Initially faced challenges with data preprocessing pipelines that affected how data was passed to the model. These issues have been resolved, leading to more consistent and higher-quality training.
 
 ## Installation 💿
 
@@ -69,6 +74,17 @@ TinyGPT was trained using PyTorch on the TinyStories dataset. The training proce
 
 <img src="https://github.com/user-attachments/assets/fd318849-d83b-4e44-aa3e-3119897cd4ae" alt="Loss Curve" width="70%"/>
 
+### Training Optimizations 🚀
+
+TinyGPT's training process leverages several optimization techniques to enhance speed, stability, and performance:
+
+- **Kernel Fusion**: Implemented to reduce memory bandwidth bottlenecks and speed up training operations
+- **Mixed Precision Training**: Utilizes bfloat16 format for significantly faster training while maintaining numerical stability
+- **Gradient Accumulation**: Applied to improve training stability and allow effective training with larger batch sizes
+- **Cosine Scheduler**: Implements variable learning rate throughout training for better convergence
+- **PyTorch's Multi-Head Attention**: Uses standard PyTorch implementations for Multi-Head Attention layers to boost training speed
+
+While using PyTorch's native attention implementation deviates from the "from scratch" philosophy, it enables more rapid model iteration and training with available resources.
 
 For details on the training process, see the training notebook in the `notebooks/` directory.
 
@@ -84,6 +100,7 @@ One day, a dragon named Bobo was walking in the forest when he saw a little bunn
 Bobo was very happy and thanked the bunny. He named the bunny, and they became good friends. The bunny was always grateful for Bobo's help. They became good friends, and they always shared their toys and treats!
 ```
 
+### Example 2
 ```
 Prompt: A dog named
 
