@@ -12,17 +12,25 @@ import pandas as pd
 import tiktoken
 import inspect
 
-encoding = tiktoken.get_encoding("gpt2")
 
 class Tokenizer:
     def __init__(self, tokenizer_model="gpt2"):
-        self.enc = tiktoken.get_encoding(tokenizer_model)
+        gpt2_enc = tiktoken.get_encoding(tokenizer_model)
+        self.enc = tiktoken.Encoding(
+            name=tokenizer_model,
+            pat_str=gpt2_enc._pat_str,
+            mergeable_ranks=gpt2_enc._mergeable_ranks,
+			special_tokens={
+                **gpt2_enc._special_tokens,
+                "PAD": 50257,
+			},
+		)
         self.tokenizer_model = tokenizer_model
 
         self.n_words = self.enc.n_vocab
         self.bos_id = None
         self.eos_id = self.enc.eot_token
-        self.pad_id = None
+        self.pad_id = self.enc._special_tokens["PAD"]
 
     def encode(self, s: str, bos: bool = False, eos: bool = False) -> List[int]:
         t = self.enc.encode(s)
@@ -35,15 +43,14 @@ class Tokenizer:
     def decode(self, tokens: List[int]) -> str:
         return self.enc.decode(tokens)
     
-
 tokenizer = Tokenizer(tokenizer_model="gpt2")
 
 vocab_size = 50304
-batch_size = 32
+batch_size = 16
 block_size = 512
 max_iters = 1
 eval_interval = 1000
-learning_rate = 7e-5
+learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 256
 n_embd = 512
@@ -51,7 +58,7 @@ n_head = 8
 n_layer = 8
 dropout = 0.3
 
-target_batch_size = 8192 * 2
+target_batch_size = 1024
 gradient_accumulation_steps = target_batch_size // batch_size
 weight_decay = 1e-1
 beta1 = 0.9
@@ -74,12 +81,34 @@ ds = datasets.load_dataset("roneneldan/TinyStories")
 ds = ds.with_format("torch")
 
 def collate_fn(batch):
-    texts = [encode(item['text'])[:block_size] for item in batch]  # Truncate to block_size
-    padded_texts = [t + [0] * (block_size - len(t)) for t in texts]  # Pad to 512
-    return {
-        'text': torch.tensor(padded_texts, dtype=torch.long)
-    }
+    texts = [encode(item['text'])[:block_size+1] for item in batch]
 
+    batch_data = []
+    for text in texts:
+        if len(text) <= 1:
+            continue
+
+        input_text = text[:-1]
+
+        target_text = text[1:]
+
+        if len(input_text) < block_size:
+            input_text = input_text + [0] * (block_size - len(input_text))
+        if len(target_text) < block_size:
+            target_text = target_text + [0] * (block_size - len(target_text))
+            
+        batch_data.append({
+            'input': torch.tensor(input_text, dtype=torch.long),
+            'target': torch.tensor(target_text, dtype=torch.long)
+        })
+
+    if not batch_data:
+        return None
+    
+    return {
+        'input': torch.stack([item['input'] for item in batch_data]),
+        'target': torch.stack([item['target'] for item in batch_data])
+    }
 
 subset_indices = list(range(eval_iters))
 dataset_valid = Subset(ds['validation'], subset_indices)
@@ -227,7 +256,7 @@ model = GPTLanguageModel()
 
 model = model.to(device)
 model = torch.compile(model)
-# print the number of parameters in the model
+
 print(sum(p.numel() for p in model.parameters())/1e6, 'M parameters')
 
 fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
@@ -236,20 +265,12 @@ print(f"{use_fused=}")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=(beta1, beta2), eps=1e-8, fused=use_fused)
 
-# T_max = len(train_dataloader)
-# warmup_steps = 0.01 * T_max
-# scheduler = lr_scheduler.OneCycleLR(
-#     optimizer, max_lr=4e-4, total_steps=T_max, pct_start=0.01
-# )
 true_total_steps = len(train_dataloader) // gradient_accumulation_steps
 scheduler = lr_scheduler.OneCycleLR(
-    optimizer, max_lr=8e-5, total_steps=true_total_steps, pct_start=0.05
+    optimizer, max_lr=8e-4, total_steps=true_total_steps, pct_start=0.05
 )
 
 os.makedirs("ckpt/", exist_ok=True)
-
-sample = tokenizer.decode(tokenizer.encode(ds["train"][0]["text"][:100], bos=True, eos=True))
-print(f"Sample text: {sample}")
 
 def generate(model, idx, max_new_tokens):
     for _ in range(max_new_tokens):
@@ -267,19 +288,22 @@ def generate(model, idx, max_new_tokens):
         idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
     return idx
 
-# print(gradient_accumulation_steps, batch_size, target_batch_size)
-print(f"{gradient_accumulation_steps=}, {batch_size=}, {target_batch_size=}")
-
 with open("losses.txt", "w") as f:
-	f.write("Training Loss,Validation Loss,Output\n")
-     
+	f.write("Step,Learing Rate,Training Loss,Validation Loss,Output\n")
 
 for iter, batch in enumerate(tqdm.notebook.tqdm(train_dataloader, total=len(train_dataloader))):
-    inputs, targets = batch['text'], batch['text']
+    # inputs, targets = batch['text'], batch['text']
+    inputs = batch['input'][:, :-1]
+    targets = batch['input'][:, 1:]
     inputs, targets = inputs.to(device), targets.to(device)
 
     with torch.autocast(device_type=str(device), dtype=torch.bfloat16):
-        logits, loss = model(inputs, targets)
+        logits, _ = model(inputs)
+        loss = F.cross_entropy(
+			logits.view(-1, logits.size(-1)),
+			targets.view(-1),
+			ignore_index=tokenizer.pad_id
+		)
 
     loss = loss / gradient_accumulation_steps
     loss.backward()
@@ -291,7 +315,7 @@ for iter, batch in enumerate(tqdm.notebook.tqdm(train_dataloader, total=len(trai
         optimizer.zero_grad()
         scheduler.step()
 
-    if iter % (gradient_accumulation_steps * 2) == 0 or iter == max_iters - 1:
+    if iter % (gradient_accumulation_steps * 32) == 0 or iter == max_iters - 1:
         print(f"\nStep {iter}: Performing validation")
         print(f"Learning rate: {scheduler.get_last_lr()[0]:.6f}")
         model.eval()
@@ -299,9 +323,16 @@ for iter, batch in enumerate(tqdm.notebook.tqdm(train_dataloader, total=len(trai
             val_loss = 0
             train_loss = loss.item() * gradient_accumulation_steps
             for batch in tqdm.notebook.tqdm(valid_dataloader, total=len(valid_dataloader)):
-                inputs, targets = batch['text'], batch['text']
+                # inputs, targets = batch['text'], batch['text']
+                inputs = batch['input'][:, :-1]
+                targets = batch['input'][:, 1:]
                 inputs, targets = inputs.to(device), targets.to(device)
-                _, loss = model(inputs, targets)
+                logits, _ = model(inputs)
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)),
+					targets.view(-1),
+					ignore_index=tokenizer.pad_id
+				)
                 val_loss += loss.item()
 
             torch.save(model.state_dict(), f"ckpt/ckpt_{iter}.pt")
@@ -312,17 +343,22 @@ for iter, batch in enumerate(tqdm.notebook.tqdm(train_dataloader, total=len(trai
             prompt = torch.tensor([encode(prompt)], dtype=torch.long, device=device)
             output = decode(generate(model, prompt, max_new_tokens=50)[0].tolist())
             print(output)
+            output = output.replace("\n", "\n")
+            output = output.replace('"', "'")
             with open("losses.txt", "a") as f:
-                f.write(f"{train_loss},{val_loss / len(valid_dataloader)},\"{output}\"\n")
+                f.write(f"{iter},{scheduler.get_last_lr()[0]:.6f},{train_loss},{val_loss / len(valid_dataloader)},\"{output}\"\n")
         model.train()
 
-torch.save(model.state_dict(), "ckpt/ckpt_final.pt")
+torch.save(model.state_dict(), "final_model_tiny_stories_tiktoken.pt")
+
 model = model.eval()
 
 prompt = "There was a girl who"
+
 prompt = torch.tensor([encode(prompt)], dtype=torch.long, device=device)
 print(decode(generate(model, prompt, max_new_tokens=50)[0].tolist()))
 
-prompt = "One day, a little girl named Lily found"
+prompt = "A little boy found a"
+
 prompt = torch.tensor([encode(prompt)], dtype=torch.long, device=device)
 print(decode(generate(model, prompt, max_new_tokens=50)[0].tolist()))
