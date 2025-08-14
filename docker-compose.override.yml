@@ -1,0 +1,8 @@
+services:
+  tinygpt-app:
+    volumes:
+      - .:/app
+    environment:
+      - STREAMLIT_SERVER_RUN_ON_SAVE=true
+      - STREAMLIT_SERVER_FILE_WATCHER_TYPE=poll
+    command: ["streamlit", "run", "main.py", "--server.fileWatcherType", "poll"]

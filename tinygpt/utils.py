@@ -12,6 +12,9 @@ def generate_square_subsequent_mask(sz):
     mask = torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
     return mask
 
+def generate_square_subsequent_mask_with_device(sz:int, device=None):
+    return torch.triu(torch.full((sz,sz), float('-inf'), device=device if device else torch.device('cpu')), diagonal=1)
+
 def generate(model, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.7, top_k: int = 50, top_p: float = 0.95, word_repetition_penalty: float = 1.0):
     """
     Generate new tokens from the model given an initial sequence of indices 'idx'.
@@ -72,3 +75,34 @@ def generate(model, idx: torch.Tensor, max_new_tokens: int, temperature: float =
             generated_tokens = torch.cat((generated_tokens, next_token), dim=1)
 
             yield next_token
+
+def remove_orig_mod_prefix(state_dict):
+    """
+    Remove '_orig_mod.' prefix from state dict keys.
+    This is needed when loading models that were saved with torch.compile() or similar optimizations.
+    """
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith('_orig_mod.'):
+            new_key = key[len('_orig_mod.'):]
+            new_state_dict[new_key] = value
+        else:
+            new_state_dict[key] = value
+    return new_state_dict
+
+def map_swiglu_keys(state_dict):
+    """
+    Map swiglu keys from liger_kernel format to fallback format.
+    This handles the difference between:
+    - Saved: blocks.X.moe.experts.Y.swiglu.gate_proj.weight
+    - Expected: blocks.X.moe.experts.Y.gate_proj.weight
+    """
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if '.swiglu.' in key:
+            # Remove the .swiglu. part from the key
+            new_key = key.replace('.swiglu.', '.')
+            new_state_dict[new_key] = value
+        else:
+            new_state_dict[key] = value
+    return new_state_dict

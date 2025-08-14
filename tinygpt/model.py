@@ -1,9 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import os
 
-from tinygpt.config import GPTConfig
-from tinygpt.layers import DecoderBlock
+# Check if it is linux
+if os.name == 'posix':
+    from liger_kernel.transformers import LigerSwiGLUMLP, liger_rotary_pos_emb, LigerFusedLinearCrossEntropyLoss
+
+from tinygpt.config import GPTConfig, MoEGPTConfig
+from tinygpt.layers import DecoderBlock, CausalMoEBlock, RotaryEmbeddings
+from tinygpt.utils import remove_orig_mod_prefix, map_swiglu_keys
 
 
 class GPTLanguageModel(nn.Module):
@@ -85,4 +91,78 @@ class GPTLanguageModel(nn.Module):
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
+        return idx
+
+
+class MoEGPTLanguageModel(nn.Module):
+    def __init__(self, config: MoEGPTConfig, device: str):
+        super().__init__()
+        self.config = config
+        self.device = device
+        self.token_emb = nn.Embedding(self.config.vocab_size, self.config.n_embd)
+        self.pos_emb = nn.Embedding(self.config.block_size, self.config.n_embd)
+        self.blocks = nn.ModuleList([CausalMoEBlock(self.config, self.device) for _ in range(self.config.n_layer)])
+        self.ln_f = nn.LayerNorm(self.config.n_embd)
+        self.lm_head = nn.Linear(self.config.n_embd, self.config.vocab_size, bias=False)
+        self.lm_head.weight = self.token_emb.weight
+        self.block_size = self.config.block_size
+
+        if self.config.pad_token_id:
+            self.loss_fct = LigerFusedLinearCrossEntropyLoss(ignore_index=self.config.pad_token_id).to(self.lm_head.weight.device)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(m.weight, 0.0, 0.02)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def forward(self, idx, targets=None, inference=False):
+        B,T = idx.shape
+        x = self.token_emb(idx) + self.pos_emb(
+            torch.arange(T, device=idx.device))
+        for blk in self.blocks:
+            x = blk(x)
+        x = self.ln_f(x)
+        logits = self.lm_head(x)
+        if inference or targets is None:
+            return logits if inference else (logits, None)
+        logits_flat = logits.view(-1, self.config.vocab_size)
+        target_flat = targets.view(-1)
+        if hasattr(self, 'loss_fct'):
+            loss = self.loss_fct(self.lm_head.weight,
+                                 x.view(-1, self.config.n_embd),
+                                 target_flat)
+        else:
+            loss = F.cross_entropy(logits_flat, target_flat, ignore_index=self.config.pad_token_id)
+        return logits, loss
+    
+    @classmethod
+    def from_pretrained(self, pretrained_model_path: str, device: str = "cpu") -> "MoEGPTLanguageModel":
+        """
+        Load a pretrained model from the specified path.
+        """
+        model = self(MoEGPTConfig(), device=device)
+        state_dict = torch.load(pretrained_model_path, map_location=device)
+        state_dict = remove_orig_mod_prefix(state_dict)
+        state_dict = map_swiglu_keys(state_dict)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        
+        if missing_keys:
+            print(f"Warning: Missing keys: {missing_keys[:10]}...")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys: {unexpected_keys[:10]}...")
+
+        model.eval()
+        model.to(device)
+        return model
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens):
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -self.config.block_size:]
+            logits,_ = self(idx_cond)
+            probs = F.softmax(logits[:, -1, :], dim=-1)
+            nxt = torch.multinomial(probs, 1)
+            idx = torch.cat([idx, nxt], dim=1)
         return idx
