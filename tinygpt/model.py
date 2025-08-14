@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import os
 
 # Check if it is linux
-if os.name == 'posix':
+if os.name == 'posix' and torch.cuda.is_available():
     from liger_kernel.transformers import LigerSwiGLUMLP, liger_rotary_pos_emb, LigerFusedLinearCrossEntropyLoss
 
 from tinygpt.config import GPTConfig, MoEGPTConfig
