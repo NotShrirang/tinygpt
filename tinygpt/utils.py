@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from typing import Iterator, Optional
 
 from tinygpt.config import GPTConfig
 
@@ -15,7 +16,15 @@ def generate_square_subsequent_mask(sz):
 def generate_square_subsequent_mask_with_device(sz:int, device=None):
     return torch.triu(torch.full((sz,sz), float('-inf'), device=device if device else torch.device('cpu')), diagonal=1)
 
-def generate(model, idx: torch.Tensor, max_new_tokens: int, temperature: float = 0.7, top_k: int = 50, top_p: float = 0.95, word_repetition_penalty: float = 1.0):
+def generate(
+    model,
+    idx: torch.Tensor,
+    max_new_tokens: int,
+    temperature: float = 0.7,
+    top_k: int = 50,
+    top_p: float = 0.9,
+    word_repetition_penalty: float = 1.0
+) -> Iterator[torch.Tensor]:
     """
     Generate new tokens from the model given an initial sequence of indices 'idx'.
     The generation continues for 'max_new_tokens' steps.

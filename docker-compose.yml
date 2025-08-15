@@ -46,6 +46,42 @@ services:
       - dev
     command: ["streamlit", "run", "main.py", "--server.fileWatcherType", "poll"]
 
+  tinygpt-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: tinygpt-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./tinygpt/weights:/app/tinygpt/weights
+    environment:
+      - PYTHONPATH=/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  tinygpt-api-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: tinygpt-api-dev
+    ports:
+      - "8080:8000"
+    volumes:
+      - .:/app
+    environment:
+      - PYTHONPATH=/app
+    restart: unless-stopped
+    profiles:
+      - dev
+    command:
+      ["python", "app.py", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
 networks:
   default:
     name: tinygpt-network

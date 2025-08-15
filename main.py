@@ -4,9 +4,7 @@ import torch
 import time
 import os
 
-from tinygpt.model import GPTLanguageModel, MoEGPTLanguageModel
-from tinygpt.config import GPTConfig, MoEGPTConfig
-from tinygpt.tokenizer import Tokenizer
+from tinygpt import GPTLanguageModel, MoEGPTLanguageModel, GPTConfig, MoEGPTConfig, Tokenizer
 from tinygpt.utils import generate
 
 

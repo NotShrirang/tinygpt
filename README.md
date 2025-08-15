@@ -136,7 +136,26 @@ This launches a web application where you can:
 - Input text prompts and see real-time generated responses
 - Download models automatically from Hugging Face
 
-#### Option 2: Docker (Recommended for production)
+#### Option 2: FastAPI Service (Production REST API)
+
+```bash
+# Start FastAPI server directly
+python app.py
+
+# Or use Docker
+docker-compose up tinygpt-api --build
+```
+
+Features:
+
+- REST API endpoints for text generation
+- Dual model support (TinyGPT and TinyGPT-MoE)
+- Interactive Swagger docs at http://localhost:8000/docs
+- Health monitoring and model management
+
+For detailed API documentation, see `docs/API.md`.
+
+#### Option 3: Docker (Recommended for production)
 
 ```bash
 # Production deployment
