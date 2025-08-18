@@ -31,6 +31,8 @@ TinyGPT comes in two variants:
 
 ### TinyGPT (Standard) 🤖
 
+<img width="1748" height="1240" alt="TinyGPT Architecture" src="https://github.com/user-attachments/assets/1fbca234-61c9-4207-824a-763f97c903be" />
+
 - 8 transformer blocks 🧱
 - 8 attention heads 👁️
 - 512 embedding dimensions 📊
