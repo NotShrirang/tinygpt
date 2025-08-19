@@ -31,7 +31,7 @@ TinyGPT comes in two variants:
 
 ### TinyGPT (Standard) 🤖
 
-<img width="1748" height="1240" alt="TinyGPT Architecture" src="https://github.com/user-attachments/assets/1fbca234-61c9-4207-824a-763f97c903be" />
+<img width="1748" height="1240" alt="TinyGPT 51M" src="https://github.com/user-attachments/assets/984fabe1-e714-453a-958d-63138e34b941" />
 
 - 8 transformer blocks 🧱
 - 8 attention heads 👁️
@@ -41,6 +41,8 @@ TinyGPT comes in two variants:
 - Parameters: ~51M
 
 ### TinyGPT-MoE (Mixture of Experts) 🧠
+
+<img width="1748" height="1240" alt="TinyGPT MoE 84M" src="https://github.com/user-attachments/assets/80e3b1d8-c027-41f3-ba5f-551557f65223" />
 
 - 8 transformer blocks with MoE layers 🧱
 - 8 attention heads 👁️
