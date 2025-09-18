@@ -6,9 +6,11 @@ import os
 # Check if it is linux
 if os.name == 'posix' and torch.cuda.is_available():
     from liger_kernel.transformers import LigerSwiGLUMLP, liger_rotary_pos_emb, LigerFusedLinearCrossEntropyLoss
+else:
+    LigerFusedLinearCrossEntropyLoss = None
 
-from tinygpt.config import GPTConfig, MoEGPTConfig
-from tinygpt.layers import DecoderBlock, CausalMoEBlock, RotaryEmbeddings
+from tinygpt.config import GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig
+from tinygpt.layers import DecoderBlock, CausalMoEBlock, RotaryEmbeddings, WikipediaCausalMoEBlock
 from tinygpt.utils import remove_orig_mod_prefix, map_swiglu_keys
 
 
@@ -162,6 +164,94 @@ class MoEGPTLanguageModel(nn.Module):
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.config.block_size:]
             logits,_ = self(idx_cond)
+            probs = F.softmax(logits[:, -1, :], dim=-1)
+            nxt = torch.multinomial(probs, 1)
+            idx = torch.cat([idx, nxt], dim=1)
+        return idx
+
+
+class WikipediaMoEGPTLanguageModel(nn.Module):
+    """
+    Wikipedia-trained Mixture of Experts GPT Language Model with 8 experts.
+    Based on the architecture from wikipedia_titoken_MoE_train.py
+    """
+    def __init__(self, config: WikipediaMoEGPTConfig, device: str):
+        super().__init__()
+        self.config = config
+        self.device = device
+        self.token_emb = nn.Embedding(config.vocab_size, config.n_embd, device=device)
+        self.pos_emb = nn.Embedding(config.block_size, config.n_embd, device=device)
+        self.blocks = nn.ModuleList([WikipediaCausalMoEBlock(config, device) for _ in range(config.n_layer)])
+        self.ln_f = nn.LayerNorm(config.n_embd)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False, device=device)
+        self.lm_head.weight = self.token_emb.weight
+        self.block_size = config.block_size
+
+        if config.pad_token_id and LigerFusedLinearCrossEntropyLoss:
+            self.loss_fct = LigerFusedLinearCrossEntropyLoss(ignore_index=config.pad_token_id).to(device)
+        
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(m.weight, 0.0, 0.02)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def forward(self, idx, targets=None, inference=False):
+        B, T = idx.shape
+        x = self.token_emb(idx) + self.pos_emb(torch.arange(T, device=idx.device))
+        
+        for blk in self.blocks:
+            x = blk(x)
+        
+        x = self.ln_f(x)
+        logits = self.lm_head(x)
+        
+        if inference or targets is None:
+            return logits if inference else (logits, None)
+        
+        logits_flat = logits.view(-1, self.config.vocab_size)
+        target_flat = targets.view(-1)
+        
+        if hasattr(self, 'loss_fct'):
+            loss = self.loss_fct(self.lm_head.weight,
+                                 x.view(-1, self.config.n_embd),
+                                 target_flat)
+        else:
+            loss = F.cross_entropy(logits_flat, target_flat, ignore_index=self.config.pad_token_id)
+        
+        return logits, loss
+    
+    @classmethod
+    def from_pretrained(cls, pretrained_model_path: str, device: str = "cpu") -> "WikipediaMoEGPTLanguageModel":
+        """
+        Load a pretrained Wikipedia MoE model from the specified path.
+        """
+        config = WikipediaMoEGPTConfig()
+        model = cls(config, device=device)
+        state_dict = torch.load(pretrained_model_path, map_location=device)
+        state_dict = remove_orig_mod_prefix(state_dict)
+        state_dict = map_swiglu_keys(state_dict)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        
+        if missing_keys:
+            print(f"Warning: Missing keys: {missing_keys[:10]}...")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys: {unexpected_keys[:10]}...")
+
+        model.eval()
+        model.to(device)
+        return model
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens):
+        """
+        Generate new tokens using the Wikipedia MoE model.
+        """
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -self.config.block_size:]
+            logits, _ = self(idx_cond)
             probs = F.softmax(logits[:, -1, :], dim=-1)
             nxt = torch.multinomial(probs, 1)
             idx = torch.cat([idx, nxt], dim=1)

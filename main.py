@@ -4,7 +4,7 @@ import torch
 import time
 import os
 
-from tinygpt import GPTLanguageModel, MoEGPTLanguageModel, GPTConfig, MoEGPTConfig, Tokenizer
+from tinygpt import GPTLanguageModel, MoEGPTLanguageModel, WikipediaMoEGPTLanguageModel, GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig, Tokenizer
 from tinygpt.utils import generate
 
 
@@ -24,6 +24,13 @@ MODEL_CONFIGS = {
         "local_path": "./tinygpt/weights/final_model_moe_storyteller_tiktoken_19072025.pt",
         "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/final_model_moe_storyteller_tiktoken_19072025.pt",
         "description": "A Mixture of Experts GPT model with enhanced storytelling capabilities."
+    },
+    "Wikipedia-MoE": {
+        "class": WikipediaMoEGPTLanguageModel,
+        "config": WikipediaMoEGPTConfig(),
+        "local_path": "./tinygpt/weights/final_model_moe_wikipedia_tiktoken_29072025.pt",
+        "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/fina_model_moe_wikipedia_180920245_ckpt_9553656.pt",  # No download URL yet as this is a new model
+        "description": "A Wikipedia-trained MoE GPT model with 8 experts and 16 attention heads for enhanced knowledge representation."
     }
 }
 
@@ -65,8 +72,9 @@ def load_model(model_name):
         return None, None
     
     try:
-        if model_name == "TinyGPT-MoE":
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        if model_name in ["TinyGPT-MoE", "Wikipedia-MoE"]:
             model = model_class.from_pretrained(local_path, device="cpu")
         else:
             model = model_class.from_pretrained(pretrained_model_path=local_path, device="cpu")
@@ -84,6 +92,10 @@ def ensure_model_downloaded(model_name):
     download_url = model_config["download_url"]
     
     if not os.path.exists(local_path):
+        if download_url is None:
+            st.error(f"{model_name} model weights are not available for download yet. Please train the model first.")
+            return False
+            
         with st.spinner(f"Downloading {model_name} model..."):
             st.info(f"Model weights not found. Downloading {model_name} from Hugging Face...")
             try:
@@ -137,6 +149,8 @@ with st.sidebar:
     
     if selected_model == "TinyGPT-MoE":
         st.info("💡 TinyGPT-MoE uses Mixture of Experts for enhanced storytelling capabilities.")
+    elif selected_model == "Wikipedia-MoE":
+        st.info("🧠 Wikipedia-MoE uses 8 experts and 16 attention heads for enhanced knowledge representation.")
     
     st.info("Note: Adjusting these settings can affect the creativity and coherence of the generated text.")
 
@@ -190,7 +204,7 @@ if user_input:
         st.success(f"Finished generating **{len(tokens)}** tokens in **{elapsed_time:.2f} seconds**! **{len(tokens) / elapsed_time:.2f} tokens/s**")
 
 with st.expander("Model Information", expanded=False):
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.subheader("TinyGPT")
@@ -204,6 +218,17 @@ with st.expander("Model Information", expanded=False):
         st.subheader("TinyGPT-MoE")
         st.write("- **Parameters**: 85M")
         st.write("- **Training Data**: Tiny Stories dataset")
+        st.write("- **Architecture**: MoE with 4 experts")
+        st.write("- **Attention Heads**: 8")
+        st.write("- **Embedding Dimension**: 512")
+
+    with col3:
+        st.subheader("Wikipedia-MoE")
+        st.write("- **Parameters**: ~135M")
+        st.write("- **Training Data**: Wikipedia (C4 dataset)")
+        st.write("- **Architecture**: MoE with 8 experts")
+        st.write("- **Attention Heads**: 16")
+        st.write("- **Embedding Dimension**: 512")
         st.write("- **Architecture**: Mixture of Experts GPT")
         st.write("- **Attention Heads**: 8")
         st.write("- **Experts**: 4")
