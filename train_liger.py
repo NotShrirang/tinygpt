@@ -14,22 +14,24 @@ import csv
 from typing import Optional, Tuple, List
 
 torch.set_float32_matmul_precision('high')
+torch.cuda.empty_cache()
 
 # Configuration
 class Config:
     vocab_size = 50304
-    batch_size = 6
+    batch_size = 8
     block_size = 512
-    eval_interval = 1000
+    eval_interval = 8096
     learning_rate = 3e-4
     eval_iters = 200
-    n_embd = 512
-    n_head = 8
+    n_embd = 768
+    n_head = 16
     n_layer = 8
-    gqa_kv_head = 4
+    gqa_kv_head = 8
+    hidden_size = 2048
     dropout = 0.1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    gradient_accumulation_steps = 64  # Target ~64 batch size
+    gradient_accumulation_steps = 2048 // batch_size
     weight_decay = 1e-1
     beta1 = 0.9
     beta2 = 0.95
@@ -37,6 +39,12 @@ class Config:
     compile = True  # Use torch.compile if available
 
 config = Config()
+
+print("# Training Configuration:")
+# for k, v in inspect.getmembers(config):
+#     print(f"- {k}: {v}")
+
+print({k: v for k, v in inspect.getmembers(config) if not k.startswith('__')})
 
 # Liger Kernel Imports
 try:
@@ -246,15 +254,15 @@ class GroupedQueryAttention(nn.Module):
         return self.out_proj(attn_output), new_kv_cache
 
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: Config):
         super().__init__()
         self.ln1 = get_rms_norm(config.n_embd)
         self.attn = GroupedQueryAttention(config.n_embd, config.n_head, config.gqa_kv_head, config.dropout)
         self.ln2 = get_rms_norm(config.n_embd)
         self.ffwd = nn.Sequential(
-            nn.Linear(config.n_embd, 4 * config.n_embd),
+            nn.Linear(config.n_embd, config.hidden_size),
             nn.GELU(),
-            nn.Linear(4 * config.n_embd, config.n_embd),
+            nn.Linear(config.hidden_size, config.n_embd),
             nn.Dropout(config.dropout)
         )
         
@@ -272,7 +280,7 @@ class Block(nn.Module):
         return x, new_kv_cache
 
 class GPT(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: Config):
         super().__init__()
         self.config = config
         self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
@@ -415,20 +423,23 @@ def train():
     if config.compile:
         print("Compiling model...")
         model = torch.compile(model)
+        print("Model compiled.")
         
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay, betas=(config.beta1, config.beta2), fused=True if torch.cuda.is_available() else False)
     
     # Calculate total steps based on dataset size
-    total_steps = len(train_loader)
-    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+    true_total_steps = len(train_loader) // config.gradient_accumulation_steps
+    scheduler = lr_scheduler.OneCycleLR(
+        optimizer, max_lr=8e-4, total_steps=true_total_steps, pct_start=0.05
+    )
     
     print(f"Starting training on {config.device} with Liger={USE_LIGER}")
-    print(f"Total training steps: {total_steps}")
+    print(f"Total training steps: {true_total_steps}")
     
     model.train()
-    
+
     # Progress bar
-    pbar = tqdm.tqdm(enumerate(train_loader), total=total_steps, desc="Training")
+    pbar = tqdm.tqdm(enumerate(train_loader), total=len(train_loader), desc="Training")
     
     # Throughput tracking
     start_time = time.time()
@@ -456,7 +467,10 @@ def train():
         
         with torch.autocast(device_type=config.device, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
             logits, loss, _ = model(inputs, targets)
-            
+
+        # Store original loss for metrics before scaling
+        original_loss = loss.item()
+        loss = loss / config.gradient_accumulation_steps
         loss.backward()
         train_losses.append(loss.item())
         
@@ -476,7 +490,7 @@ def train():
         else:
             tokens_per_sec = 0
             
-        if step % config.eval_interval == 0:
+        if step % (config.gradient_accumulation_steps * 32) == 0 or step == len(train_loader) - 1:
             model.eval()
             val_loss = 0
             val_token_count = 0
@@ -490,8 +504,8 @@ def train():
             val_loss /= len(valid_loader)
             val_losses.append(val_loss)
             
-            # Calculate perplexity
-            train_perplexity = math.exp(loss.item())
+            # Calculate perplexity using original unscaled loss
+            train_perplexity = math.exp(original_loss)
             val_perplexity = math.exp(val_loss)
             
             # Calculate average throughput
@@ -499,7 +513,7 @@ def train():
             avg_tokens_per_sec = total_tokens_processed / elapsed_time if elapsed_time > 0 else 0
             current_lr = optimizer.param_groups[0]['lr']
             
-            print(f"\nStep {step}: Train Loss {loss.item():.4f}, Val Loss {val_loss:.4f}")
+            print(f"\nStep {step}: Train Loss {original_loss:.4f}, Val Loss {val_loss:.4f}")
             print(f"Train Perplexity: {train_perplexity:.2f}, Val Perplexity: {val_perplexity:.2f}")
             print(f"Time: {elapsed_time:.2f}s, Throughput: {tokens_per_sec:.2f} tokens/sec (current), {avg_tokens_per_sec:.2f} tokens/sec (avg)")
             print(f"Total tokens processed: {total_tokens_processed:,}")
@@ -514,7 +528,7 @@ def train():
                 print(f"\nGenerated sample:\n{generated_text}\n")
             
             # Log metrics to CSV (with generated text properly escaped)
-            csv_writer.writerow([step, loss.item(), val_loss, train_perplexity, val_perplexity, 
+            csv_writer.writerow([step, original_loss, val_loss, train_perplexity, val_perplexity, 
                                 current_lr, tokens_per_sec, avg_tokens_per_sec, total_tokens_processed, elapsed_time, generated_text])
             csv_file.flush()
             
@@ -525,30 +539,21 @@ def train():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
-                'train_loss': loss.item(),
+                'train_loss': original_loss,
                 'val_loss': val_loss,
                 'train_perplexity': train_perplexity,
                 'val_perplexity': val_perplexity,
                 'train_losses': train_losses,
                 'val_losses': val_losses,
                 'total_tokens_processed': total_tokens_processed,
-                'config': {
-                    'vocab_size': config.vocab_size,
-                    'batch_size': config.batch_size,
-                    'block_size': config.block_size,
-                    'n_embd': config.n_embd,
-                    'n_head': config.n_head,
-                    'n_layer': config.n_layer,
-                    'gqa_kv_head': config.gqa_kv_head,
-                    'dropout': config.dropout,
-                }
+                'config': {k: v for k, v in inspect.getmembers(config) if not k.startswith('__')}
             }
             torch.save(checkpoint, ckpt_path)
             print(f"Checkpoint saved to {ckpt_path}")
             
             model.train()
             
-        pbar.set_description(f"Loss: {loss.item():.4f} | Time: {step_time * 1000:.2f}ms | {tokens_per_sec:.0f} tok/s")
+        pbar.set_description(f"Loss: {original_loss:.4f} | Time: {step_time * 1000:.2f}ms | {tokens_per_sec:.0f} tok/s")
     
     # Close CSV file
     csv_file.close()
