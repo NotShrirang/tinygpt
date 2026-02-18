@@ -317,24 +317,19 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, kv_caches=None):
+    def forward(self, idx, targets=None, kv_caches=None, start_pos=None):
         B, T = idx.shape
         device = idx.device
         
         x = self.token_embedding(idx)
-        
-        freqs_cis = self.freqs_cis[:T] # type: ignore
-        if kv_caches is not None:
-            # If using cache, we might be at a later position
-            # We need to handle position index for RoPE
-            # Assuming idx is just the new tokens
-            # This requires tracking total length.
-            # For simplicity in training, we don't use kv_cache.
-            # For generation, we will handle it.
-            pass
-            
-        # Always use causal attention for full sequences (training or initial prompt pass)
-        # KV cache generation (single token) doesn't need causal mask — handled inside attention
+
+        if kv_caches is not None and start_pos is not None:
+            # During cached generation: only the new token(s), at the correct RoPE position
+            freqs_cis = self.freqs_cis[start_pos:start_pos + T]
+        else:
+            # During training or initial prompt pass
+            freqs_cis = self.freqs_cis[:T]
+
         is_causal = True
 
         new_kv_caches = []
@@ -357,17 +352,15 @@ class GPT(nn.Module):
         return logits, loss, new_kv_caches
 
     @torch.inference_mode()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    @torch.compiler.disable
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, tokenizer=None, stream=False):
         self.eval()
-        # Simple generation without KV cache for now to ensure correctness first, 
-        # or implement KV cache loop.
-        # Let's implement KV cache loop for demonstration.
-        
         B, T = idx.shape
-        kv_caches = None
-        
-        # Initial pass
-        logits, _, kv_caches = self(idx, kv_caches=None)
+
+        # Initial prefill pass — process the full prompt
+        logits, _, kv_caches = self(idx, kv_caches=None, start_pos=None)
+        cur_pos = T  # next token position
+
         logits = logits[:, -1, :] / temperature
         if top_k is not None:
             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -375,26 +368,14 @@ class GPT(nn.Module):
         probs = F.softmax(logits, dim=-1)
         idx_next = torch.multinomial(probs, num_samples=1)
         idx = torch.cat((idx, idx_next), dim=1)
-        
+
+        if stream and tokenizer:
+            print(tokenizer.decode([idx_next.item()]), end="", flush=True)
+
+        # Autoregressive decoding with KV cache — only feed 1 token at a time
         for _ in range(max_new_tokens - 1):
-            # Forward only the new token
-            # We need to handle RoPE positions correctly.
-            # Current implementation of apply_rotary_emb assumes starting from 0 if we pass freqs_cis[:T]
-            # We need to pass the correct slice of freqs_cis corresponding to the position of the new token.
-            
-            # Fix RoPE for generation with cache:
-            # We need to pass the correct freqs_cis for the current position.
-            # The model forward needs to know the offset.
-            
-            # For this script, to keep it simple and robust, I will fall back to full forward for generation
-            # unless I strictly fix the RoPE logic in forward.
-            # Given "Implement a single script... make code modular and clean", I should probably do it right.
-            
-            # But to avoid bugs without testing, I'll stick to standard generation (re-forwarding) for the demo output,
-            # as training is the main goal.
-            
-            idx_cond = idx[:, -self.config.block_size:]
-            logits, _, _ = self(idx_cond)
+            logits, _, kv_caches = self(idx_next, kv_caches=kv_caches, start_pos=cur_pos)
+            cur_pos += 1
             logits = logits[:, -1, :] / temperature
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -402,7 +383,13 @@ class GPT(nn.Module):
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
-            
+
+            if stream and tokenizer:
+                print(tokenizer.decode([idx_next.item()]), end="", flush=True)
+
+        if stream:
+            print()  # newline after streaming
+
         return idx
 
 # Training Loop
@@ -503,7 +490,10 @@ def train(resume=False):
     if resume_ckpt:
         print(f"Resuming from checkpoint: {resume_ckpt}")
         ckpt = torch.load(resume_ckpt, map_location=config.device, weights_only=False)
-        model.load_state_dict(ckpt['model_state_dict'])
+        # Strip _orig_mod. prefix added by torch.compile
+        state_dict = ckpt['model_state_dict']
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         scheduler.load_state_dict(ckpt['scheduler_state_dict'])
         start_opt_step = ckpt['opt_step']
@@ -607,9 +597,10 @@ def train(resume=False):
                     prompt = "The meaning of life is"
                     prompt_tokens = tokenizer.encode(prompt)
                     prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long).to(config.device)
-                    generated = model.generate(prompt_tensor, max_new_tokens=100, temperature=0.8, top_k=40)
+                    print(f"\nGenerated: {prompt}", end="", flush=True)
+                    generated = model.generate(prompt_tensor, max_new_tokens=50, temperature=0.8, top_k=40, tokenizer=tokenizer, stream=True)
                     generated_text = tokenizer.decode(generated[0].tolist())
-                    print(f"\nGenerated:\n{generated_text}\n")
+                    print()  # blank line after generation
 
                 csv_writer.writerow([opt_step, avg_micro_loss, val_loss, train_perplexity, val_perplexity,
                                     current_lr, tokens_per_sec, avg_tokens_per_sec, total_tokens_processed, elapsed_time, generated_text])
@@ -619,7 +610,7 @@ def train(resume=False):
                 ckpt_path = os.path.join(config.checkpoint_dir, f"ckpt_step{opt_step}.pth")
                 checkpoint = {
                     'opt_step': opt_step,
-                    'model_state_dict': model.state_dict(),
+                    'model_state_dict': {k.replace("_orig_mod.", ""): v for k, v in model.state_dict().items()},
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'train_loss': avg_micro_loss,
