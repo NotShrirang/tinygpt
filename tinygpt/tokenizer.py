@@ -22,7 +22,7 @@ class Tokenizer:
         self.pad_id = self.enc._special_tokens["PAD"]
 
     def encode(self, s: str, bos: bool = False, eos: bool = False) -> List[int]:
-        t = self.enc.encode(s)
+        t = self.enc.encode(s, disallowed_special=())
         if bos and self.bos_id is not None:
             t = [self.bos_id] + t
         if eos and self.eos_id is not None:

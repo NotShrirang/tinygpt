@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from tinygpt import GPTLanguageModel, MoEGPTLanguageModel, GPTConfig, MoEGPTConfig, Tokenizer
+from tinygpt import GPTLanguageModel, MoEGPTLanguageModel, TinyGPT2, GPTConfig, MoEGPTConfig, TinyGPT2Config, Tokenizer
 from tinygpt.utils import generate
 
 
@@ -36,6 +36,13 @@ MODEL_CONFIGS = {
         "local_path": "./tinygpt/weights/final_model_moe_storyteller_tiktoken_19072025.pt",
         "description": "85M parameter Mixture of Experts model with enhanced storytelling capabilities",
         "parameters": "85M"
+    },
+    "tinygpt2": {
+        "class": TinyGPT2,
+        "config": TinyGPT2Config(),
+        "local_path": "./tinygpt/weights/tinygpt2_ckpt_2026_02_18_20_42.pth",
+        "description": "95M parameter GPT model with RoPE, GQA, and RMSNorm trained on OpenWebText",
+        "parameters": "95M"
     }
 }
 
@@ -56,7 +63,7 @@ def load_model(model_name: str) -> bool:
         
         print(f"Loading {model_name}...")
         
-        if model_name == "tinygpt-moe":
+        if model_name in ("tinygpt-moe", "tinygpt2"):
             model = model_class.from_pretrained(local_path, device="cpu")
         else:
             model = model_class.from_pretrained(pretrained_model_path=local_path, device="cpu")

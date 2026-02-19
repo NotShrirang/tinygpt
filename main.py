@@ -4,7 +4,7 @@ import torch
 import time
 import os
 
-from tinygpt import GPTLanguageModel, MoEGPTLanguageModel, WikipediaMoEGPTLanguageModel, GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig, Tokenizer
+from tinygpt import GPTLanguageModel, MoEGPTLanguageModel, WikipediaMoEGPTLanguageModel, TinyGPT2, GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig, TinyGPT2Config, Tokenizer
 from tinygpt.utils import generate
 
 
@@ -31,6 +31,13 @@ MODEL_CONFIGS = {
         "local_path": "./tinygpt/weights/final_model_moe_wikipedia_tiktoken_29072025.pt",
         "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/fina_model_moe_wikipedia_180920245_ckpt_9553656.pt",  # No download URL yet as this is a new model
         "description": "A Wikipedia-trained MoE GPT model with 8 experts and 16 attention heads for enhanced knowledge representation."
+    },
+    "TinyGPT2": {
+        "class": TinyGPT2,
+        "config": TinyGPT2Config(),
+        "local_path": "./tinygpt/weights/tinygpt2_ckpt_2026_02_18_20_42.pth",
+        "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/tinygpt2_ckpt_2026_02_18_20_42.pth",
+        "description": "A 95M parameter GPT model with RoPE, GQA, and RMSNorm trained on OpenWebText."
     }
 }
 
@@ -74,7 +81,7 @@ def load_model(model_name):
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        if model_name in ["TinyGPT-MoE", "Wikipedia-MoE"]:
+        if model_name in ["TinyGPT-MoE", "Wikipedia-MoE", "TinyGPT2"]:
             model = model_class.from_pretrained(local_path, device="cpu")
         else:
             model = model_class.from_pretrained(pretrained_model_path=local_path, device="cpu")
@@ -204,32 +211,43 @@ if user_input:
         st.success(f"Finished generating **{len(tokens)}** tokens in **{elapsed_time:.2f} seconds**! **{len(tokens) / elapsed_time:.2f} tokens/s**")
 
 with st.expander("Model Information", expanded=False):
-    col1, col2, col3 = st.columns(3)
-    
+    col1, col2 = st.columns(2)
+
     with col1:
         st.subheader("TinyGPT")
-        st.write("- **Parameters**: 51M")
+        st.write("- **Parameters**: ~51M")
         st.write("- **Training Data**: Tiny Stories dataset")
         st.write("- **Architecture**: Standard GPT")
+        st.write("- **Layers**: 8")
         st.write("- **Attention Heads**: 8")
         st.write("- **Embedding Dimension**: 512")
 
     with col2:
         st.subheader("TinyGPT-MoE")
-        st.write("- **Parameters**: 85M")
+        st.write("- **Parameters**: ~85M")
         st.write("- **Training Data**: Tiny Stories dataset")
-        st.write("- **Architecture**: MoE with 4 experts")
+        st.write("- **Architecture**: MoE with 4 experts (top-2)")
+        st.write("- **Layers**: 8")
         st.write("- **Attention Heads**: 8")
         st.write("- **Embedding Dimension**: 512")
+
+    col3, col4 = st.columns(2)
 
     with col3:
         st.subheader("Wikipedia-MoE")
         st.write("- **Parameters**: ~135M")
         st.write("- **Training Data**: Wikipedia (C4 dataset)")
-        st.write("- **Architecture**: MoE with 8 experts")
+        st.write("- **Architecture**: MoE with 8 experts (top-2)")
+        st.write("- **Layers**: 8")
         st.write("- **Attention Heads**: 16")
         st.write("- **Embedding Dimension**: 512")
-        st.write("- **Architecture**: Mixture of Experts GPT")
-        st.write("- **Attention Heads**: 8")
-        st.write("- **Experts**: 4")
-        st.write("- **Embedding Dimension**: 512")
+
+    with col4:
+        st.subheader("TinyGPT2")
+        st.write("- **Parameters**: ~95M")
+        st.write("- **Training Data**: OpenWebText")
+        st.write("- **Architecture**: GPT with RoPE, GQA, RMSNorm")
+        st.write("- **Layers**: 12")
+        st.write("- **Attention Heads**: 12 (4 KV groups)")
+        st.write("- **Embedding Dimension**: 768")
+        st.write("- **FFN Hidden Size**: 2048")

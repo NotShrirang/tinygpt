@@ -6,15 +6,23 @@ import os
 
 # Check if CUDA is available and we're on a POSIX system before importing liger_kernel
 USE_LIGER = os.name == 'posix' and torch.cuda.is_available()
+USE_LIGER_RMS = False
 
 if USE_LIGER:
     try:
         from liger_kernel.transformers import LigerSwiGLUMLP, liger_rotary_pos_emb, LigerFusedLinearCrossEntropyLoss
+        try:
+            from liger_kernel.transformers.rms_norm import LigerRMSNorm
+            USE_LIGER_RMS = True
+        except ImportError:
+            pass
     except ImportError:
         USE_LIGER = False
 
 from tinygpt.utils import generate_square_subsequent_mask, generate_square_subsequent_mask_with_device
-from tinygpt.config import GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig
+from tinygpt.config import GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig, TinyGPT2Config
+
+
 
 
 class DecoderBlock(nn.Module):
@@ -291,3 +299,121 @@ class WikipediaCausalMoEBlock(nn.Module):
         x = x + attn_out
         x = x + self.moe(self.ln2(x))
         return x
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        return self.weight * (x / rms)
+
+
+def get_rms_norm(dim, eps=1e-6):
+    # Always use pure PyTorch RMSNorm for CPU/CUDA compatibility.
+    # LigerRMSNorm (Triton) only works on CUDA tensors and crashes on CPU.
+    return RMSNorm(dim, eps)
+
+
+def precompute_freqs_cis(dim, seq_len, theta=10000.0):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+    t = torch.arange(seq_len, dtype=torch.float)
+    freqs = torch.outer(t, freqs)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    return freqs_cis
+
+
+def apply_rotary_emb(x, freqs_cis):
+    # x: (B, T, H, D)
+    x_complex = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
+
+    # freqs_cis: (T, D/2) -> (1, T, 1, D/2)
+    freqs_cis = freqs_cis[:x.shape[1]]
+    freqs_cis = freqs_cis.view(1, x.shape[1], 1, -1)
+
+    x_rotated = x_complex * freqs_cis
+    x_out = torch.view_as_real(x_rotated).flatten(-2)
+    return x_out.type_as(x)
+
+
+class GroupedQueryAttention(nn.Module):
+    def __init__(self, n_embd, n_head, n_query_groups, dropout=0.1):
+        super().__init__()
+        assert n_head % n_query_groups == 0
+
+        self.n_head = n_head
+        self.n_query_groups = n_query_groups
+        self.head_dim = n_embd // n_head
+
+        self.q_proj = nn.Linear(n_embd, n_embd, bias=False)
+        self.k_proj = nn.Linear(n_embd, n_query_groups * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(n_embd, n_query_groups * self.head_dim, bias=False)
+        self.out_proj = nn.Linear(n_embd, n_embd, bias=False)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, freqs_cis, is_causal=True, kv_cache=None):
+        B, T, C = x.shape
+        H = self.n_head
+        G = self.n_query_groups
+        D = self.head_dim
+
+        q = self.q_proj(x).view(B, T, H, D)
+        k = self.k_proj(x).view(B, T, G, D)
+        v = self.v_proj(x).view(B, T, G, D)
+
+        # Apply RoPE
+        q = apply_rotary_emb(q, freqs_cis)
+        k = apply_rotary_emb(k, freqs_cis)
+
+        # KV Caching
+        if kv_cache is not None:
+            k_past, v_past = kv_cache
+            k = torch.cat([k_past, k], dim=1)
+            v = torch.cat([v_past, v], dim=1)
+
+        new_kv_cache = (k, v)
+
+        # Repeat K/V for GQA
+        k = k[:, :, :, None, :].expand(B, -1, G, H // G, D).reshape(B, -1, H, D)
+        v = v[:, :, :, None, :].expand(B, -1, G, H // G, D).reshape(B, -1, H, D)
+
+        # Transpose for attention: (B, H, T, D)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # Causal masking during training, disabled during cached generation
+        use_causal = is_causal and kv_cache is None
+        attn_output = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal)
+
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
+        return self.out_proj(attn_output), new_kv_cache
+
+
+class TinyGPT2Block(nn.Module):
+    def __init__(self, config: TinyGPT2Config):
+        super().__init__()
+        self.ln1 = get_rms_norm(config.n_embd)
+        self.attn = GroupedQueryAttention(config.n_embd, config.n_head, config.gqa_kv_head, config.dropout)
+        self.ln2 = get_rms_norm(config.n_embd)
+        self.ffwd = nn.Sequential(
+            nn.Linear(config.n_embd, config.hidden_size),
+            nn.GELU(),
+            nn.Linear(config.hidden_size, config.n_embd),
+            nn.Dropout(config.dropout)
+        )
+
+    def forward(self, x, freqs_cis, is_causal=True, kv_cache=None):
+        residual = x
+        x = self.ln1(x)
+        attn_out, new_kv_cache = self.attn(x, freqs_cis, is_causal, kv_cache)
+        x = residual + attn_out
+
+        residual = x
+        x = self.ln2(x)
+        x = residual + self.ffwd(x)
+
+        return x, new_kv_cache

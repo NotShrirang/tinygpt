@@ -3,16 +3,20 @@
 
 __version__ = "1.0.0"
 
-from .model import GPTLanguageModel, MoEGPTLanguageModel, WikipediaMoEGPTLanguageModel
-from .config import GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig
+from .model import GPTLanguageModel, MoEGPTLanguageModel, WikipediaMoEGPTLanguageModel, TinyGPT2
+from .config import GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig, TinyGPT2Config
 from .tokenizer import Tokenizer
 from .utils import generate
 
 __all__ = [
     "GPTLanguageModel",
-    "MoEGPTLanguageModel", 
+    "MoEGPTLanguageModel",
+    "WikipediaMoEGPTLanguageModel",
+    "TinyGPT2",
     "GPTConfig",
     "MoEGPTConfig",
+    "WikipediaMoEGPTConfig",
+    "TinyGPT2Config",
     "Tokenizer",
     "generate"
 ]

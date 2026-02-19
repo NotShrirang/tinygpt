@@ -9,8 +9,8 @@ if os.name == 'posix' and torch.cuda.is_available():
 else:
     LigerFusedLinearCrossEntropyLoss = None
 
-from tinygpt.config import GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig
-from tinygpt.layers import DecoderBlock, CausalMoEBlock, RotaryEmbeddings, WikipediaCausalMoEBlock
+from tinygpt.config import GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig, TinyGPT2Config
+from tinygpt.layers import DecoderBlock, CausalMoEBlock, RotaryEmbeddings, WikipediaCausalMoEBlock, TinyGPT2Block, get_rms_norm, precompute_freqs_cis
 from tinygpt.utils import remove_orig_mod_prefix, map_swiglu_keys
 
 
@@ -256,3 +256,122 @@ class WikipediaMoEGPTLanguageModel(nn.Module):
             nxt = torch.multinomial(probs, 1)
             idx = torch.cat([idx, nxt], dim=1)
         return idx
+
+
+class TinyGPT2(nn.Module):
+    def __init__(self, config: TinyGPT2Config, pad_id: int = 50257):
+        super().__init__()
+        self.config = config
+        self.block_size = config.block_size
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index=pad_id)
+        self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
+
+        self.blocks = nn.ModuleList([TinyGPT2Block(config) for _ in range(config.n_layer)])
+        self.ln_f = get_rms_norm(config.n_embd)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        self.token_embedding.weight = self.lm_head.weight  # Weight tying
+
+        # Precompute RoPE frequencies (*2 for extrapolation safety)
+        self.register_buffer('freqs_cis', precompute_freqs_cis(config.n_embd // config.n_head, config.block_size * 2))
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx, targets=None, kv_caches=None, start_pos=None):
+        B, T = idx.shape
+
+        x = self.token_embedding(idx)
+
+        if kv_caches is not None and start_pos is not None:
+            freqs_cis = self.freqs_cis[start_pos:start_pos + T]
+        else:
+            freqs_cis = self.freqs_cis[:T]
+
+        is_causal = True
+
+        new_kv_caches = []
+
+        for i, block in enumerate(self.blocks):
+            kv_cache = kv_caches[i] if kv_caches else None
+            x, new_cache = block(x, freqs_cis, is_causal=is_causal, kv_cache=kv_cache)
+            new_kv_caches.append(new_cache)
+
+        x = self.ln_f(x)
+        logits = self.lm_head(x)
+
+        loss = None
+        if targets is not None:
+            logits = logits.view(-1, self.config.vocab_size)
+            targets = targets.view(-1)
+            loss = self.loss_fn(logits, targets)
+
+        return logits, loss, new_kv_caches
+
+    @torch.inference_mode()
+    @torch.compiler.disable
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, tokenizer=None, stream=False):
+        self.eval()
+        B, T = idx.shape
+
+        # Initial prefill pass
+        logits, _, kv_caches = self(idx, kv_caches=None, start_pos=None)
+        cur_pos = T
+
+        logits = logits[:, -1, :] / temperature
+        if top_k is not None:
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = -float('Inf')
+        probs = F.softmax(logits, dim=-1)
+        idx_next = torch.multinomial(probs, num_samples=1)
+        idx = torch.cat((idx, idx_next), dim=1)
+
+        if stream and tokenizer:
+            print(tokenizer.decode([idx_next.item()]), end="", flush=True)
+
+        # Autoregressive decoding with KV cache
+        for _ in range(max_new_tokens - 1):
+            logits, _, kv_caches = self(idx_next, kv_caches=kv_caches, start_pos=cur_pos)
+            cur_pos += 1
+            logits = logits[:, -1, :] / temperature
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+
+            if stream and tokenizer:
+                print(tokenizer.decode([idx_next.item()]), end="", flush=True)
+
+        if stream:
+            print()
+
+        return idx
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_path: str, device: str = "cpu") -> "TinyGPT2":
+        from tinygpt.tokenizer import Tokenizer
+
+        config = TinyGPT2Config()
+        tokenizer = Tokenizer()
+        model = cls(config, pad_id=tokenizer.pad_id)
+
+        state_dict = torch.load(pretrained_model_path, map_location=device, weights_only=False)
+
+        # Handle checkpoint format (dict with 'model_state_dict' key)
+        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+            state_dict = state_dict['model_state_dict']
+
+        state_dict = remove_orig_mod_prefix(state_dict)
+        model.load_state_dict(state_dict)
+        model.eval()
+        model.to(device)
+        return model

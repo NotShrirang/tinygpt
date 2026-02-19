@@ -50,7 +50,8 @@ def generate(
     with torch.no_grad():
         for _ in range(max_new_tokens):
             seq = generated_tokens[:, -model.block_size:]
-            logits, _ = model(seq)
+            result = model(seq)
+            logits = result[0]
             logits = logits[:, -1, :]
 
             if word_repetition_penalty != 1.0:

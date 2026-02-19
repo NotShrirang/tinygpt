@@ -5,37 +5,43 @@ import torch.optim.lr_scheduler as lr_scheduler
 from torch.utils.data import DataLoader
 import tqdm
 import os
-import tiktoken
 import math
 import inspect
 import datasets
 import time
 import csv
-from typing import List
 import argparse
+
+from tinygpt import TinyGPT2, TinyGPT2Config, Tokenizer
+from tinygpt.layers import USE_LIGER_RMS as USE_LIGER
 
 torch.set_float32_matmul_precision('high')
 torch.cuda.empty_cache()
 
-# Configuration
+# Configuration — model params come from TinyGPT2Config, training params here
+model_config = TinyGPT2Config()
+
 class Config:
-    vocab_size = 50304
+    # Model config (delegate to TinyGPT2Config)
+    vocab_size = model_config.vocab_size
+    block_size = model_config.block_size
+    n_embd = model_config.n_embd
+    n_head = model_config.n_head
+    n_layer = model_config.n_layer
+    gqa_kv_head = model_config.gqa_kv_head
+    hidden_size = model_config.hidden_size
+    dropout = model_config.dropout
+    weight_decay = model_config.weight_decay
+    beta1 = model_config.beta1
+    beta2 = model_config.beta2
+
+    # Training config
     batch_size = 8
-    block_size = 512
     eval_interval = 500  # evaluate every N optimizer steps
     learning_rate = 3e-4
     eval_iters = 50  # number of val batches per evaluation
-    n_embd = 768
-    n_head = 12
-    n_layer = 12
-    gqa_kv_head = 4
-    hidden_size = 2048
-    dropout = 0.1
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     gradient_accumulation_steps = 64  # effective batch = 8 * 64 * 512 = 262k tokens/step
-    weight_decay = 1e-1
-    beta1 = 0.9
-    beta2 = 0.95
     max_steps = 50000  # total optimizer steps
     checkpoint_dir = "checkpoints"
     compile = True  # Use torch.compile if available
@@ -77,44 +83,12 @@ def print_banner():
 
 print_banner()
 
-# Liger Kernel Imports
-try:
-    from liger_kernel.transformers.rms_norm import LigerRMSNorm
-    # from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
-    # Liger RoPE might be available as an op or we use custom. 
-    # Checking for LigerRoPE or similar. If not found, we use custom.
-    # For now, we will use custom RoPE as it's architecture specific often.
-    # But we definitely use LigerRMSNorm and LigerCrossEntropyLoss.
+if USE_LIGER:
     print("Liger kernels imported successfully.")
-    USE_LIGER = True
-except ImportError as e:
-    print(f"Error importing Liger kernels: {e}")
+else:
     print("Liger kernels not found. Falling back to standard implementations.")
-    USE_LIGER = False
 
 # Tokenizer
-class Tokenizer:
-    def __init__(self, tokenizer_model="gpt2"):
-        gpt2_enc = tiktoken.get_encoding(tokenizer_model)
-        self.enc = tiktoken.Encoding(
-            name=tokenizer_model,
-            pat_str=gpt2_enc._pat_str,
-            mergeable_ranks=gpt2_enc._mergeable_ranks,
-            special_tokens={
-                **gpt2_enc._special_tokens,
-                "PAD": 50257,
-            },
-        )
-        self.pad_id = self.enc._special_tokens["PAD"]
-
-    def encode(self, s: str) -> List[int]:
-        return self.enc.encode(s, disallowed_special=())
-
-    def decode(self, tokens: List[int]) -> str:
-        # Filter out tokens outside tiktoken's vocab (from padded vocab_size)
-        valid_tokens = [t for t in tokens if t < self.enc.n_vocab]
-        return self.enc.decode(valid_tokens)
-
 tokenizer = Tokenizer()
 
 # Data Loading
@@ -159,238 +133,6 @@ def prepare_data():
     )
 
     return train_loader
-
-# Model Components
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
-        return self.weight * (x / rms)
-
-def get_rms_norm(dim, eps=1e-6):
-    if USE_LIGER:
-        return LigerRMSNorm(hidden_size=dim, eps=eps)
-    return RMSNorm(dim, eps)
-
-def precompute_freqs_cis(dim, seq_len, theta=10000.0):
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
-    t = torch.arange(seq_len, dtype=torch.float)
-    freqs = torch.outer(t, freqs)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
-    return freqs_cis
-
-def apply_rotary_emb(x, freqs_cis):
-    # x: (B, T, H, D) or (B, H, T, D) - wait, let's check usage
-    # Usually (B, T, H, D) if batch_first=True in logic
-    # The notebook implementation assumes (B, T, H, D) for q/k before transpose?
-    # Notebook: q = q_rot.transpose(1, 2) -> (B, H, T, head_dim)
-    # So input to apply_rotary_emb is (B, T, H, head_dim)
-    
-    d = x.shape[-1]
-    # Reshape to (..., D/2, 2)
-    x_complex = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-    
-    # freqs_cis: (T, D/2)
-    # We need to broadcast. 
-    # x_complex: (B, T, H, D/2)
-    # freqs_cis: (T, D/2) -> (1, T, 1, D/2)
-    
-    freqs_cis = freqs_cis[:x.shape[1]] # Crop to seq_len
-    freqs_cis = freqs_cis.view(1, x.shape[1], 1, -1)
-    
-    x_rotated = x_complex * freqs_cis
-    x_out = torch.view_as_real(x_rotated).flatten(-2)
-    return x_out.type_as(x)
-
-class GroupedQueryAttention(nn.Module):
-    def __init__(self, n_embd, n_head, n_query_groups, dropout=0.1):
-        super().__init__()
-        assert n_head % n_query_groups == 0
-        
-        self.n_head = n_head
-        self.n_query_groups = n_query_groups
-        self.head_dim = n_embd // n_head
-        
-        self.q_proj = nn.Linear(n_embd, n_embd, bias=False)
-        self.k_proj = nn.Linear(n_embd, n_query_groups * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(n_embd, n_query_groups * self.head_dim, bias=False)
-        self.out_proj = nn.Linear(n_embd, n_embd, bias=False)
-        
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, x, freqs_cis, is_causal=True, kv_cache=None):
-        B, T, C = x.shape
-        H = self.n_head
-        G = self.n_query_groups
-        D = self.head_dim
-
-        q = self.q_proj(x).view(B, T, H, D)
-        k = self.k_proj(x).view(B, T, G, D)
-        v = self.v_proj(x).view(B, T, G, D)
-
-        # Apply RoPE
-        q = apply_rotary_emb(q, freqs_cis)
-        k = apply_rotary_emb(k, freqs_cis)
-
-        # KV Caching
-        if kv_cache is not None:
-            k_past, v_past = kv_cache
-            k = torch.cat([k_past, k], dim=1)
-            v = torch.cat([v_past, v], dim=1)
-
-        new_kv_cache = (k, v)
-
-        # Repeat K/V for GQA
-        k = k[:, :, :, None, :].expand(B, -1, G, H // G, D).reshape(B, -1, H, D)
-        v = v[:, :, :, None, :].expand(B, -1, G, H // G, D).reshape(B, -1, H, D)
-
-        # Transpose for attention: (B, H, T, D)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        # Use causal masking during training (full sequence), disable during cached generation
-        # (when using KV cache, q is 1 token attending to all past — no causal mask needed)
-        use_causal = is_causal and kv_cache is None
-        attn_output = F.scaled_dot_product_attention(q, k, v, is_causal=use_causal)
-
-        
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
-        return self.out_proj(attn_output), new_kv_cache
-
-class Block(nn.Module):
-    def __init__(self, config: Config):
-        super().__init__()
-        self.ln1 = get_rms_norm(config.n_embd)
-        self.attn = GroupedQueryAttention(config.n_embd, config.n_head, config.gqa_kv_head, config.dropout)
-        self.ln2 = get_rms_norm(config.n_embd)
-        self.ffwd = nn.Sequential(
-            nn.Linear(config.n_embd, config.hidden_size),
-            nn.GELU(),
-            nn.Linear(config.hidden_size, config.n_embd),
-            nn.Dropout(config.dropout)
-        )
-        
-    def forward(self, x, freqs_cis, is_causal=True, kv_cache=None):
-        # x: (B, T, C)
-        residual = x
-        x = self.ln1(x)
-        attn_out, new_kv_cache = self.attn(x, freqs_cis, is_causal, kv_cache)
-        x = residual + attn_out
-        
-        residual = x
-        x = self.ln2(x)
-        x = residual + self.ffwd(x)
-        
-        return x, new_kv_cache
-
-class GPT(nn.Module):
-    def __init__(self, config: Config, pad_id: int = 50257):
-        super().__init__()
-        self.config = config
-        self.loss_fn = nn.CrossEntropyLoss(ignore_index=pad_id)
-        self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
-        # No pos embedding, using RoPE
-        
-        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
-        self.ln_f = get_rms_norm(config.n_embd)
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        
-        self.token_embedding.weight = self.lm_head.weight # Weight tying
-        
-        # Precompute RoPE frequencies
-        self.register_buffer('freqs_cis', precompute_freqs_cis(config.n_embd // config.n_head, config.block_size * 2)) 
-        # *2 to allow for some extrapolation or just safety
-        
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
-    def forward(self, idx, targets=None, kv_caches=None, start_pos=None):
-        B, T = idx.shape
-        device = idx.device
-        
-        x = self.token_embedding(idx)
-
-        if kv_caches is not None and start_pos is not None:
-            # During cached generation: only the new token(s), at the correct RoPE position
-            freqs_cis = self.freqs_cis[start_pos:start_pos + T]
-        else:
-            # During training or initial prompt pass
-            freqs_cis = self.freqs_cis[:T]
-
-        is_causal = True
-
-        new_kv_caches = []
-
-        for i, block in enumerate(self.blocks):
-            kv_cache = kv_caches[i] if kv_caches else None
-            x, new_cache = block(x, freqs_cis, is_causal=is_causal, kv_cache=kv_cache)
-            new_kv_caches.append(new_cache)
-            
-        x = self.ln_f(x)
-        logits = self.lm_head(x)
-        
-        loss = None
-        if targets is not None:
-            # Flatten for loss calculation
-            logits = logits.view(-1, self.config.vocab_size)
-            targets = targets.view(-1)
-            loss = self.loss_fn(logits, targets)
-                
-        return logits, loss, new_kv_caches
-
-    @torch.inference_mode()
-    @torch.compiler.disable
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, tokenizer=None, stream=False):
-        self.eval()
-        B, T = idx.shape
-
-        # Initial prefill pass — process the full prompt
-        logits, _, kv_caches = self(idx, kv_caches=None, start_pos=None)
-        cur_pos = T  # next token position
-
-        logits = logits[:, -1, :] / temperature
-        if top_k is not None:
-            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits[logits < v[:, [-1]]] = -float('Inf')
-        probs = F.softmax(logits, dim=-1)
-        idx_next = torch.multinomial(probs, num_samples=1)
-        idx = torch.cat((idx, idx_next), dim=1)
-
-        if stream and tokenizer:
-            print(tokenizer.decode([idx_next.item()]), end="", flush=True)
-
-        # Autoregressive decoding with KV cache — only feed 1 token at a time
-        for _ in range(max_new_tokens - 1):
-            logits, _, kv_caches = self(idx_next, kv_caches=kv_caches, start_pos=cur_pos)
-            cur_pos += 1
-            logits = logits[:, -1, :] / temperature
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            probs = F.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, idx_next), dim=1)
-
-            if stream and tokenizer:
-                print(tokenizer.decode([idx_next.item()]), end="", flush=True)
-
-        if stream:
-            print()  # newline after streaming
-
-        return idx
 
 # Training Loop
 def evaluate(model, train_loader_iter):
@@ -462,7 +204,7 @@ def train(resume=False):
     )
     val_iter = iter(val_loader)
 
-    model = GPT(config, pad_id=tokenizer.pad_id).to(config.device)
+    model = TinyGPT2(model_config, pad_id=tokenizer.pad_id).to(config.device)
 
     if USE_LIGER:
         print("Using Liger kernels for RMSNorm.")
