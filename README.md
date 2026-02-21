@@ -2,11 +2,13 @@
 
 # TinyGPT 🤖
 
+> **NEW: TinyGPT2-SFT is here!** 🎉 Our 95M parameter model is now instruction fine-tuned on Stanford Alpaca. It can follow instructions, answer questions, write poems, and more — all trained on a single RTX 3070 Ti. [Try it out!](https://tinygpt.streamlit.app/)
+
 [![GitHub stars](https://img.shields.io/github/stars/NotShrirang/tinygpt?style=social)](https://github.com/NotShrirang/tinygpt/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/NotShrirang/tinygpt?style=social)](https://github.com/NotShrirang/tinygpt/network/members)
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://tinygpt.streamlit.app/)
 
-**TinyGPT** is an educational and production-ready implementation of the GPT (Generative Pre-trained Transformer) architecture, featuring four model variants ranging from simple story generators to a modern GPT-2 class model with RoPE, GQA, and RMSNorm. Built from the ground up with modern PyTorch, TinyGPT demonstrates how state-of-the-art language models can be both accessible and performant. ✨
+**TinyGPT** is an educational implementation of the GPT (Generative Pre-trained Transformer) architecture, featuring five model variants — from simple story generators to an instruction-following model built with RoPE, GQA, and RMSNorm. Built from the ground up with modern PyTorch, TinyGPT demonstrates how state-of-the-art language models can be both accessible and performant. ✨
 
 🔗 **Quick Links:**
 
@@ -16,7 +18,7 @@
 
 ## Overview 🔍
 
-TinyGPT represents a carefully crafted balance between **accessibility** and **performance** in language model design. The project progresses through four model variants — from a standard GPT to Mixture-of-Experts architectures to a modern GPT-2 model with cutting-edge techniques.
+TinyGPT represents a carefully crafted balance between **accessibility** and **performance** in language model design. The project progresses through five model variants — from a standard GPT to Mixture-of-Experts architectures to an instruction fine-tuned TinyGPT-2 model with cutting-edge techniques.
 
 ### 🎯 **Project Goals**
 
@@ -27,7 +29,7 @@ TinyGPT represents a carefully crafted balance between **accessibility** and **p
 
 ## Model Architecture 🏗️
 
-TinyGPT comes in four variants:
+TinyGPT comes in five variants:
 
 ### TinyGPT (Standard) 🤖
 
@@ -80,16 +82,26 @@ TinyGPT comes in four variants:
 - Vocabulary size of 50,304 tokens 📚
 - Context window of 512 tokens 🪟
 - Parameters: ~95M
-- Training data: OpenWebText (~3.4B+ tokens)
+- Training data: OpenWebText (~6.5B+ tokens)
+
+### TinyGPT2-SFT (Instruction Fine-Tuned) 💬
+
+- **Base model**: TinyGPT2 (~95M parameters)
+- **Fine-tuning data**: Stanford Alpaca (52K instruction-response pairs)
+- **Training**: 3 epochs with response-only loss masking
+- **Prompt format**: `### Instruction: ... ### Response: ...`
+- **Capabilities**: Follows instructions, answers questions, writes creatively
+- **Hardware**: Single NVIDIA RTX 3070 Ti (8GB VRAM), ~85 minutes total
 
 ## Datasets 📖
 
-| Model         | Dataset        | Tokens |
-| ------------- | -------------- | ------ |
-| TinyGPT       | TinyStories    | ~300M  |
-| TinyGPT-MoE   | TinyStories    | ~300M  |
-| Wikipedia-MoE | Wikipedia (C4) | ~500M  |
-| TinyGPT2      | OpenWebText    | ~3.4B+ |
+| Model         | Dataset               | Tokens |
+| ------------- | --------------------- | ------ |
+| TinyGPT       | TinyStories           | ~300M  |
+| TinyGPT-MoE   | TinyStories           | ~300M  |
+| Wikipedia-MoE | Wikipedia (C4)        | ~500M  |
+| TinyGPT2      | OpenWebText           | ~6.7B  |
+| TinyGPT2-SFT  | Stanford Alpaca (52K) | ~72M   |
 
 ### Training Data Improvements 📈
 
@@ -154,12 +166,13 @@ For detailed Docker usage, see `DOCKER.md`.
 
 ### Model Selection 🎯
 
-Choose from four model variants:
+Choose from five model variants:
 
 - **TinyGPT**: Standard 51M parameter model for story generation
 - **TinyGPT-MoE**: 85M parameter MoE model with enhanced storytelling
 - **Wikipedia-MoE**: 135M parameter MoE model trained on Wikipedia
 - **TinyGPT2**: 95M parameter modern GPT with RoPE, GQA, and RMSNorm
+- **TinyGPT2-SFT**: TinyGPT2 instruction fine-tuned on Alpaca — follows instructions and answers questions
 
 ### Quick Start Options
 
@@ -179,21 +192,25 @@ This launches a web application where you can:
 #### Option 2: CLI Inference (TinyGPT2)
 
 ```bash
-# Single prompt
-python inference.py --checkpoint checkpoints/ckpt_step13000.pth --prompt "The meaning of life"
+# SFT model (default) — wraps prompts in instruction template
+python inference.py --checkpoint checkpoints_sft/sft_epoch2.pth
 
-# Interactive mode
-python inference.py --checkpoint checkpoints/ckpt_step13000.pth
+# Pretrained model — raw text completion
+python inference.py --checkpoint checkpoints/ckpt_step25500.pth --raw
+
+# Single prompt
+python inference.py --checkpoint checkpoints_sft/sft_epoch2.pth --prompt "What is the capital of France?"
 
 # With custom settings
-python inference.py --checkpoint checkpoints/ckpt_step13000.pth --max_tokens 200 --temperature 0.8 --top_k 40
+python inference.py --checkpoint checkpoints_sft/sft_epoch2.pth --max_tokens 200 --temperature 0.7 --top_k 40
 ```
 
 Features:
 
 - KV cache for fast autoregressive generation
-- Streaming token-by-token output
+- Streaming token-by-token output with EOS detection
 - Interactive REPL mode
+- Instruction template (default) or raw mode (`--raw`)
 - Checkpoint info display (step, loss, tokens seen)
 
 #### Option 3: FastAPI Service (Production REST API)
@@ -265,6 +282,33 @@ Training configuration:
 - **Evaluation**: Periodic validation with sample text generation
 - **Checkpointing**: Automatic saves with train/val loss tracking
 
+### Supervised Fine-Tuning (SFT)
+
+Fine-tune TinyGPT2 on instruction-following tasks using the Stanford Alpaca dataset:
+
+```bash
+# Fine-tune from a pretrained checkpoint
+python sft.py --checkpoint checkpoints/ckpt_step25500.pth
+
+# Resume SFT training
+python sft.py --checkpoint checkpoints/ckpt_step25500.pth --resume
+```
+
+SFT configuration:
+
+- **Hardware**: Single NVIDIA RTX 3070 Ti (8GB VRAM)
+- **Dataset**: Stanford Alpaca (52K instruction-response pairs, 90/10 train/val split)
+- **Epochs**: 3 (~85 minutes total)
+- **Effective batch size**: 16K tokens/step (batch 4 × grad accum 8 × block size 512)
+- **Response-only loss masking**: Only trains on the response portion, not the instruction prompt
+- **Prompt template**: `### Instruction: ... ### Input: ... ### Response: ...`
+
+| Epoch | Train Loss | Val Loss | Train PPL | Val PPL |
+| ----- | ---------- | -------- | --------- | ------- |
+| 1     | 2.13       | 2.01     | 8.45      | 7.44    |
+| 2     | 1.97       | 1.98     | 7.17      | 7.27    |
+| 3     | 1.91       | 1.98     | 6.77      | 7.26    |
+
 ### Training Optimizations 🚀
 
 #### Standard TinyGPT Optimizations
@@ -305,7 +349,8 @@ tinygpt/
 │   ├── utils.py              # Generation utilities, mask helpers
 │   └── weights/              # Model weight files
 ├── train_liger.py            # TinyGPT2 pretraining script (OpenWebText)
-├── inference.py              # TinyGPT2 CLI inference with KV cache
+├── sft.py                    # Supervised fine-tuning on Stanford Alpaca
+├── inference.py              # TinyGPT2 CLI inference with KV cache & instruction template
 ├── main.py                   # Streamlit web UI (all models)
 ├── app.py                    # FastAPI REST API service
 ├── notebooks/                # Training notebooks
@@ -385,6 +430,19 @@ Love is both good and bad; it is one of love's most enduring possessions.
 Love is the most fundamental, at times, measure of humanity's capacity for love. Love is an object of a man's desire and a desire. The desire of the man is the most important attribute of love.
 
 Love is a self-awareness. It is a way of feeling out and doing something.
+```
+
+### TinyGPT2-SFT (Instruction Fine-Tuned)
+
+```text
+>>> Explain what machine learning is in simple terms.
+Machine learning is a branch of computer science that focuses on using machine learning algorithms to identify patterns in data and identify patterns in data. It is a branch of computer science that focuses on creating computer systems that can perform tasks such as image recognition, image classification, and natural language processing. Machine learning algorithms are used to develop algorithms that can be used to generate and classify data in order to identify patterns in data. These algorithms are used to analyze large amounts of data and make predictions about future trends.
+
+>>> What is the capital of France?
+The capital of France is Paris.
+
+>>> Write a motivational quote.
+"The only way to make a difference is to be bold and courageous."
 ```
 
 ## License 📜

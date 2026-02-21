@@ -37,9 +37,25 @@ MODEL_CONFIGS = {
         "config": TinyGPT2Config(),
         "local_path": "./tinygpt/weights/tinygpt2_ckpt_2026_02_18_20_42.pth",
         "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/tinygpt2_ckpt_2026_02_18_20_42.pth",
-        "description": "A 95M parameter GPT model with RoPE, GQA, and RMSNorm trained on OpenWebText."
+        "description": "A 95M parameter GPT model with RoPE, GQA, and RMSNorm trained on OpenWebText.",
+        "sft": False,
+    },
+    "TinyGPT2-SFT": {
+        "class": TinyGPT2,
+        "config": TinyGPT2Config(),
+        "local_path": "./tinygpt/weights/tinygpt2_ckpt_2026_02_21_8_15_it.pth",
+        "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/tinygpt2_ckpt_2026_02_21_8_15_it.pth",
+        "description": "TinyGPT2 instruction fine-tuned on Stanford Alpaca (52K instructions). Follows instructions and answers questions.",
+        "sft": True,
     }
 }
+
+
+def format_sft_prompt(instruction, input_text=""):
+    """Format a prompt for the instruction fine-tuned model using the Alpaca template."""
+    if input_text.strip():
+        return f"### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:\n"
+    return f"### Instruction:\n{instruction}\n\n### Response:\n"
 
 def download_model(url, local_path):
     """Download model weights from URL to local path."""
@@ -116,12 +132,30 @@ def ensure_model_downloaded(model_name):
 
 def generate_text(model, input_tokens, max_new_tokens=100, temperature=0.8, top_k=50, top_p=0.95, word_repetition_penalty=1.0):
     """Generate text using the model and input tokens."""
+    generated_text = ""
+    yielded_len = 0
+    eos_text = "<|endoftext|>"
+    eos_buf_len = len(eos_text)
     for idx_next in generate(model, input_tokens, max_new_tokens, temperature=temperature, top_k=top_k, top_p=top_p, word_repetition_penalty=word_repetition_penalty):
         last_token = idx_next[:, -1]
-        decoded_token = tokenizer.decode(last_token.tolist())
         if last_token.item() == tokenizer.eos_id:
             break
-        yield decoded_token
+        decoded_token = tokenizer.decode(last_token.tolist())
+        generated_text += decoded_token
+        # Stop on literal <|endoftext|> from SFT models
+        if eos_text in generated_text:
+            remaining = generated_text[yielded_len:generated_text.index(eos_text)]
+            if remaining:
+                yield remaining
+            return
+        # Hold back enough characters to detect <|endoftext|> spanning tokens
+        safe = generated_text[:max(0, len(generated_text) - eos_buf_len)]
+        if len(safe) > yielded_len:
+            yield safe[yielded_len:]
+            yielded_len = len(safe)
+    # Flush remaining buffered text
+    if len(generated_text) > yielded_len:
+        yield generated_text[yielded_len:]
 
 with st.sidebar:
     st.header("Model Selection")
@@ -158,6 +192,8 @@ with st.sidebar:
         st.info("💡 TinyGPT-MoE uses Mixture of Experts for enhanced storytelling capabilities.")
     elif selected_model == "Wikipedia-MoE":
         st.info("🧠 Wikipedia-MoE uses 8 experts and 16 attention heads for enhanced knowledge representation.")
+    elif selected_model == "TinyGPT2-SFT":
+        st.info("💬 TinyGPT2-SFT is instruction fine-tuned — just type your question or instruction naturally.")
     
     st.info("Note: Adjusting these settings can affect the creativity and coherence of the generated text.")
 
@@ -185,7 +221,12 @@ except Exception as e:
 user_input = st.chat_input(placeholder="Type your message here...")
 
 if user_input:
-    prompt_tokens = tokenizer.encode(user_input, bos=False, eos=False)
+    is_sft = MODEL_CONFIGS[selected_model].get("sft", False)
+    if is_sft:
+        full_prompt = format_sft_prompt(user_input)
+    else:
+        full_prompt = user_input
+    prompt_tokens = tokenizer.encode(full_prompt, bos=False, eos=False)
     input_tokens = torch.tensor(prompt_tokens, dtype=torch.long, device="cpu").unsqueeze(0)
     
     with st.chat_message("user"):
@@ -251,3 +292,12 @@ with st.expander("Model Information", expanded=False):
         st.write("- **Attention Heads**: 12 (4 KV groups)")
         st.write("- **Embedding Dimension**: 768")
         st.write("- **FFN Hidden Size**: 2048")
+
+    st.divider()
+
+    st.subheader("TinyGPT2-SFT")
+    st.write("- **Base Model**: TinyGPT2 (~95M parameters)")
+    st.write("- **Fine-Tuning Data**: Stanford Alpaca (52K instruction-response pairs)")
+    st.write("- **Training**: Instruction fine-tuned with response-only loss masking")
+    st.write("- **Prompt Format**: `### Instruction: ... ### Response: ...`")
+    st.write("- **Capabilities**: Follows instructions, answers questions, writes creatively")

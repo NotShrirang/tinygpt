@@ -43,6 +43,13 @@ MODEL_CONFIGS = {
         "local_path": "./tinygpt/weights/tinygpt2_ckpt_2026_02_18_20_42.pth",
         "description": "95M parameter GPT model with RoPE, GQA, and RMSNorm trained on OpenWebText",
         "parameters": "95M"
+    },
+    "tinygpt2-sft": {
+        "class": TinyGPT2,
+        "config": TinyGPT2Config(),
+        "local_path": "./tinygpt/weights/tinygpt2_ckpt_2026_02_21_8_15_it.pth",
+        "description": "TinyGPT2 instruction fine-tuned on Stanford Alpaca (52K instructions)",
+        "parameters": "95M"
     }
 }
 
@@ -63,7 +70,7 @@ def load_model(model_name: str) -> bool:
         
         print(f"Loading {model_name}...")
         
-        if model_name in ("tinygpt-moe", "tinygpt2"):
+        if model_name in ("tinygpt-moe", "tinygpt2", "tinygpt2-sft"):
             model = model_class.from_pretrained(local_path, device="cpu")
         else:
             model = model_class.from_pretrained(pretrained_model_path=local_path, device="cpu")
@@ -267,9 +274,10 @@ async def generate_text(request: GenerationRequest):
         model = models[request.model]
         
         generated_tokens = []
+        eos_text = "<|endoftext|>"
         for idx_next in generate(
-            model, 
-            input_tokens, 
+            model,
+            input_tokens,
             request.max_new_tokens,
             temperature=request.temperature,
             top_k=request.top_k,
@@ -280,10 +288,17 @@ async def generate_text(request: GenerationRequest):
             if last_token.item() == tokenizer.eos_id:
                 break
             generated_tokens.extend(last_token.tolist())
-        
+            # Check for literal <|endoftext|> from SFT models
+            if len(generated_tokens) > 5:
+                tail = tokenizer.decode(generated_tokens[-10:])
+                if eos_text in tail:
+                    break
+
         end_time = time.time()
 
         generated_text = tokenizer.decode(generated_tokens)
+        if eos_text in generated_text:
+            generated_text = generated_text[:generated_text.index(eos_text)]
         generation_time = end_time - start_time
         tokens_generated = len(generated_tokens)
         tokens_per_second = tokens_generated / generation_time if generation_time > 0 else 0
@@ -323,6 +338,10 @@ async def generate_text_stream(request: GenerationRequest):
             input_tokens = torch.tensor(prompt_tokens, dtype=torch.long, device="cpu").unsqueeze(0)
 
             model = models[request.model]
+            generated_text = ""
+            yielded_len = 0
+            eos_text = "<|endoftext|>"
+            eos_buf_len = len(eos_text)
             for idx_next in generate(
                 model,
                 input_tokens,
@@ -335,7 +354,19 @@ async def generate_text_stream(request: GenerationRequest):
                 last_token = idx_next[:, -1]
                 if last_token.item() == tokenizer.eos_id:
                     break
-                yield tokenizer.decode(last_token.tolist())
+                decoded_token = tokenizer.decode(last_token.tolist())
+                generated_text += decoded_token
+                if eos_text in generated_text:
+                    remaining = generated_text[yielded_len:generated_text.index(eos_text)]
+                    if remaining:
+                        yield remaining
+                    return
+                safe = generated_text[:max(0, len(generated_text) - eos_buf_len)]
+                if len(safe) > yielded_len:
+                    yield safe[yielded_len:]
+                    yielded_len = len(safe)
+            if len(generated_text) > yielded_len:
+                yield generated_text[yielded_len:]
 
         except Exception as e:
             yield f"Error: {str(e)}"
