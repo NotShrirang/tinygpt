@@ -11,6 +11,22 @@ from tinygpt.utils import generate
 st.set_page_config(page_title="TinyGPT", page_icon=":robot_face:", layout="wide")
 
 MODEL_CONFIGS = {
+    "TinyGPT2-SFT": {
+        "class": TinyGPT2,
+        "config": TinyGPT2Config(),
+        "local_path": "./tinygpt/weights/tinygpt2_ckpt_2026_02_21_8_15_it.pth",
+        "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/tinygpt2_ckpt_2026_02_21_8_15_it.pth",
+        "description": "TinyGPT2 instruction fine-tuned on Stanford Alpaca (52K instructions). Follows instructions and answers questions.",
+        "sft": True,
+    },
+    "TinyGPT2": {
+        "class": TinyGPT2,
+        "config": TinyGPT2Config(),
+        "local_path": "./tinygpt/weights/tinygpt2_ckpt_2026_02_18_20_42.pth",
+        "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/tinygpt2_ckpt_2026_02_18_20_42.pth",
+        "description": "A 95M parameter GPT model with RoPE, GQA, and RMSNorm trained on OpenWebText.",
+        "sft": False,
+    },
     "TinyGPT": {
         "class": GPTLanguageModel,
         "config": GPTConfig(),
@@ -32,22 +48,6 @@ MODEL_CONFIGS = {
         "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/fina_model_moe_wikipedia_180920245_ckpt_9553656.pt",  # No download URL yet as this is a new model
         "description": "A Wikipedia-trained MoE GPT model with 8 experts and 16 attention heads for enhanced knowledge representation."
     },
-    "TinyGPT2": {
-        "class": TinyGPT2,
-        "config": TinyGPT2Config(),
-        "local_path": "./tinygpt/weights/tinygpt2_ckpt_2026_02_18_20_42.pth",
-        "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/tinygpt2_ckpt_2026_02_18_20_42.pth",
-        "description": "A 95M parameter GPT model with RoPE, GQA, and RMSNorm trained on OpenWebText.",
-        "sft": False,
-    },
-    "TinyGPT2-SFT": {
-        "class": TinyGPT2,
-        "config": TinyGPT2Config(),
-        "local_path": "./tinygpt/weights/tinygpt2_ckpt_2026_02_21_8_15_it.pth",
-        "download_url": "https://huggingface.co/NotShrirang/tinygpt/resolve/main/tinygpt2_ckpt_2026_02_21_8_15_it.pth",
-        "description": "TinyGPT2 instruction fine-tuned on Stanford Alpaca (52K instructions). Follows instructions and answers questions.",
-        "sft": True,
-    }
 }
 
 

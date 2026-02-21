@@ -175,8 +175,7 @@ cython_debug/
 
 *.pt
 *.pth
-checkpoints/
-checkpoints_sft/
+checkpoints*/
 
 # Metrics plots
 plot_metrics.py
