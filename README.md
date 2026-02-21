@@ -272,6 +272,7 @@ python train_liger.py
 # Resume from checkpoint
 python train_liger.py --resume
 ```
+<img width="1800" height="900" alt="training_loss_curve" src="https://github.com/user-attachments/assets/61eb397e-0473-4fcd-8d9e-4c695a523e94" />
 
 Training configuration:
 
