@@ -4,6 +4,12 @@ import os
 from tinygpt import TinyGPT2, TinyGPT2Config, Tokenizer
 
 
+def format_prompt(instruction, input_text=""):
+    if input_text.strip():
+        return f"### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:\n"
+    return f"### Instruction:\n{instruction}\n\n### Response:\n"
+
+
 def load_model(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
@@ -23,7 +29,7 @@ def load_model(checkpoint_path, device):
 
     # Print model info
     n_params = sum(p.numel() for p in model.parameters())
-    step = checkpoint.get('opt_step', '?')
+    step = checkpoint.get('opt_step', checkpoint.get('global_step', '?'))
     train_loss = checkpoint.get('train_loss', '?')
     val_loss = checkpoint.get('val_loss', '?')
     tokens = checkpoint.get('total_tokens_processed', '?')
@@ -43,11 +49,18 @@ def load_model(checkpoint_path, device):
     return model, tokenizer, config
 
 
-def generate_text(model, tokenizer, config, prompt, max_tokens, temperature, top_k):
-    prompt_tokens = tokenizer.encode(prompt)
+def generate_text(model, tokenizer, config, prompt, max_tokens, temperature, top_k, raw=False):
+    if raw:
+        full_prompt = prompt
+    else:
+        full_prompt = format_prompt(prompt)
+
+    prompt_tokens = tokenizer.encode(full_prompt)
     prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long).to(config.device)
 
-    print(prompt, end="", flush=True)
+    if raw:
+        print(prompt, end="", flush=True)
+
     with torch.inference_mode():
         generated = model.generate(
             prompt_tensor,
@@ -56,6 +69,7 @@ def generate_text(model, tokenizer, config, prompt, max_tokens, temperature, top
             top_k=top_k,
             tokenizer=tokenizer,
             stream=True,
+            eos_token_id=tokenizer.eos_id,
         )
     print()
 
@@ -66,6 +80,7 @@ def main():
     parser = argparse.ArgumentParser(description="TinyGPT Inference")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint .pth file")
     parser.add_argument("--prompt", type=str, default=None, help="Single prompt (if omitted, enters interactive mode)")
+    parser.add_argument("--raw", action="store_true", help="Raw mode: send prompt directly without instruction template")
     parser.add_argument("--max_tokens", type=int, default=200, help="Max tokens to generate (default: 200)")
     parser.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature (default: 0.8)")
     parser.add_argument("--top_k", type=int, default=40, help="Top-k sampling (default: 40)")
@@ -75,16 +90,17 @@ def main():
     device = args.device or ('cuda' if torch.cuda.is_available() else 'cpu')
     model, tokenizer, config = load_model(args.checkpoint, device)
 
+    mode_label = "Raw" if args.raw else "Instruction"
     if args.prompt:
-        generate_text(model, tokenizer, config, args.prompt, args.max_tokens, args.temperature, args.top_k)
+        generate_text(model, tokenizer, config, args.prompt, args.max_tokens, args.temperature, args.top_k, raw=args.raw)
     else:
-        print("Interactive mode — type your prompt and press Enter. Ctrl+C to exit.\n")
+        print(f"Interactive mode ({mode_label}) — type your prompt and press Enter. Ctrl+C to exit.\n")
         try:
             while True:
                 prompt = input(">>> ")
                 if not prompt.strip():
                     continue
-                generate_text(model, tokenizer, config, prompt, args.max_tokens, args.temperature, args.top_k)
+                generate_text(model, tokenizer, config, prompt, args.max_tokens, args.temperature, args.top_k, raw=args.raw)
                 print()
         except (KeyboardInterrupt, EOFError):
             print("\nBye!")

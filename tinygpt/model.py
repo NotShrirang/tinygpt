@@ -317,9 +317,34 @@ class TinyGPT2(nn.Module):
 
     @torch.inference_mode()
     @torch.compiler.disable
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, tokenizer=None, stream=False):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, tokenizer=None, stream=False, eos_token_id=None):
         self.eval()
         B, T = idx.shape
+        eos_text = "<|endoftext|>"
+        # Buffer recent tokens to detect literal <|endoftext|> and avoid printing it
+        stream_buffer = []
+        eos_text_len = len(eos_text)
+
+        def _flush_buffer(force=False):
+            """Flush buffered tokens, holding back enough to detect EOS text."""
+            if not stream or not tokenizer:
+                return
+            if force:
+                text = tokenizer.decode(stream_buffer)
+                if eos_text in text:
+                    text = text[:text.index(eos_text)]
+                print(text, end="", flush=True)
+                stream_buffer.clear()
+            elif len(stream_buffer) > eos_text_len:
+                # Decode all buffered tokens, print all but the last eos_text_len chars
+                text = tokenizer.decode(stream_buffer)
+                if len(text) > eos_text_len:
+                    safe = text[:-eos_text_len]
+                    print(safe, end="", flush=True)
+                    # Re-encode the held-back portion to keep buffer accurate
+                    remaining = tokenizer.encode(text[-eos_text_len:])
+                    stream_buffer.clear()
+                    stream_buffer.extend(remaining)
 
         # Initial prefill pass
         logits, _, kv_caches = self(idx, kv_caches=None, start_pos=None)
@@ -333,8 +358,11 @@ class TinyGPT2(nn.Module):
         idx_next = torch.multinomial(probs, num_samples=1)
         idx = torch.cat((idx, idx_next), dim=1)
 
-        if stream and tokenizer:
-            print(tokenizer.decode([idx_next.item()]), end="", flush=True)
+        if eos_token_id is not None and idx_next.item() == eos_token_id:
+            return idx
+
+        stream_buffer.append(idx_next.item())
+        _flush_buffer()
 
         # Autoregressive decoding with KV cache
         for _ in range(max_new_tokens - 1):
@@ -348,11 +376,22 @@ class TinyGPT2(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
 
-            if stream and tokenizer:
-                print(tokenizer.decode([idx_next.item()]), end="", flush=True)
+            # Check for EOS token ID
+            if eos_token_id is not None and idx_next.item() == eos_token_id:
+                break
 
-        if stream:
-            print()
+            stream_buffer.append(idx_next.item())
+
+            # Check for literal <|endoftext|> in recent decoded text
+            if eos_token_id is not None and tokenizer:
+                tail = tokenizer.decode(stream_buffer[-10:])
+                if eos_text in tail:
+                    break
+
+            _flush_buffer()
+
+        # Flush any remaining buffered tokens
+        _flush_buffer(force=True)
 
         return idx
 

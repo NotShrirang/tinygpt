@@ -176,3 +176,8 @@ cython_debug/
 *.pt
 *.pth
 checkpoints/
+checkpoints_sft/
+
+# Metrics plots
+plot_metrics.py
+training_loss_curve.png
