@@ -1,66 +1,122 @@
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.utils.data import DataLoader
 import tqdm
-import os
 import math
 import inspect
 import datasets
 import time
 import csv
 import argparse
+import random
+import bitsandbytes as bnb
 
-from tinygpt import TinyGPT2, TinyGPT2Config, Tokenizer
+from tinygpt import TinyGPT2, TinyGPT2Config, TinyGPT2_1Config, Tokenizer
 from tinygpt.layers import USE_LIGER_RMS as USE_LIGER
 
 torch.set_float32_matmul_precision('high')
 torch.cuda.empty_cache()
 
-# Configuration — model params come from TinyGPT2Config, training params here
-model_config = TinyGPT2Config()
+# Random validation prompts pool
+EVAL_PROMPTS = [
+    "The meaning of life is",
+    "In the year 2050, technology will",
+    "The most important scientific discovery was",
+    "Once upon a time in a distant land",
+    "The history of mathematics begins with",
+    "Climate change is caused by",
+    "The best way to learn programming is",
+    "When the sun sets over the ocean",
+    "Artificial intelligence will transform",
+    "The theory of relativity explains",
+    "In a small village near the mountains",
+    "The human brain is capable of",
+    "Democracy is a system of government where",
+    "The universe began approximately",
+    "To write a good essay, you should",
+    "The capital of France is",
+    "Photosynthesis is the process by which",
+    "Shakespeare wrote many plays including",
+    "The first computer was invented",
+    "Music has the power to",
+]
+
+
+def get_config(config_name):
+    """Get model config and training hyperparams by name."""
+    if config_name == "v2.1":
+        return TinyGPT2_1Config(), {
+            'batch_size': 12,
+            'gradient_accumulation_steps': 128,
+            'max_steps': 30500,
+            'max_lr': 6e-4,
+            'learning_rate': 3e-4,
+            'eval_interval': 500,
+            'eval_iters': 50,
+            'checkpoint_dir': 'checkpoints_v2.1',
+            'gradient_checkpointing': True,
+        }
+    else:  # default — TinyGPT2 (95M)
+        return TinyGPT2Config(), {
+            'batch_size': 8,
+            'gradient_accumulation_steps': 64,
+            'max_steps': 50000,
+            'max_lr': 8e-4,
+            'learning_rate': 3e-4,
+            'eval_interval': 500,
+            'eval_iters': 50,
+            'checkpoint_dir': 'checkpoints',
+            'gradient_checkpointing': False,
+        }
+
 
 class Config:
-    # Model config (delegate to TinyGPT2Config)
-    vocab_size = model_config.vocab_size
-    block_size = model_config.block_size
-    n_embd = model_config.n_embd
-    n_head = model_config.n_head
-    n_layer = model_config.n_layer
-    gqa_kv_head = model_config.gqa_kv_head
-    hidden_size = model_config.hidden_size
-    dropout = model_config.dropout
-    weight_decay = model_config.weight_decay
-    beta1 = model_config.beta1
-    beta2 = model_config.beta2
+    """Training configuration built from model config + training hyperparams."""
+    def __init__(self, model_config, train_params):
+        # Model config
+        self.vocab_size = model_config.vocab_size
+        self.block_size = model_config.block_size
+        self.n_embd = model_config.n_embd
+        self.n_head = model_config.n_head
+        self.n_layer = model_config.n_layer
+        self.gqa_kv_head = model_config.gqa_kv_head
+        self.hidden_size = model_config.hidden_size
+        self.dropout = model_config.dropout
+        self.weight_decay = model_config.weight_decay
+        self.beta1 = model_config.beta1
+        self.beta2 = model_config.beta2
 
-    # Training config
-    batch_size = 8
-    eval_interval = 500  # evaluate every N optimizer steps
-    learning_rate = 3e-4
-    eval_iters = 50  # number of val batches per evaluation
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    gradient_accumulation_steps = 64  # effective batch = 8 * 64 * 512 = 262k tokens/step
-    max_steps = 50000  # total optimizer steps
-    checkpoint_dir = "checkpoints"
-    compile = True  # Use torch.compile if available
-    fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-    use_fused = fused_available and 'cuda' == str(device)
+        # Training config
+        self.batch_size = train_params['batch_size']
+        self.eval_interval = train_params['eval_interval']
+        self.learning_rate = train_params['learning_rate']
+        self.max_lr = train_params['max_lr']
+        self.eval_iters = train_params['eval_iters']
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.gradient_accumulation_steps = train_params['gradient_accumulation_steps']
+        self.max_steps = train_params['max_steps']
+        self.checkpoint_dir = train_params['checkpoint_dir']
+        self.gradient_checkpointing = train_params['gradient_checkpointing']
+        self.compile = True
 
-config = Config()
 
-def print_banner():
+def print_banner(config, config_name):
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
     vram = f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB" if torch.cuda.is_available() else "N/A"
     eff_batch = config.batch_size * config.gradient_accumulation_steps
     tokens_per_step = eff_batch * config.block_size
 
     print("=" * 60)
-    print("  TinyGPT Training Script (Liger Kernel Edition)")
+    print(f"  TinyGPT Training Script (Liger Kernel Edition)")
+    print(f"  Model: TinyGPT2 {'v2.1 (~183M)' if config_name == 'v2.1' else 'default (~95M)'}")
     print("=" * 60)
     print()
-    print(f"  Dataset:        Skylion007/openwebtext (streaming)")
+    print(f"  Dataset:        HuggingFaceFW/fineweb-edu (streaming)")
     print(f"  Device:         {device_name} ({vram} VRAM)")
     print()
     print("  Model Config:")
@@ -74,26 +130,22 @@ def print_banner():
     print("  Training Config:")
     print(f"    Batch size:   {config.batch_size} x {config.gradient_accumulation_steps} accum = {eff_batch} effective")
     print(f"    Tokens/step:  {tokens_per_step:,}")
-    print(f"    LR:           {config.learning_rate} -> {8e-4} (OneCycleLR)")
+    print(f"    LR:           {config.learning_rate} -> {config.max_lr} (OneCycleLR)")
+    print(f"    Optimizer:    8-bit AdamW (bitsandbytes)")
     print(f"    Max steps:    {config.max_steps:,}")
     print(f"    Eval every:   {config.eval_interval} steps")
     print(f"    Compile:      {config.compile}")
+    print(f"    Grad ckpt:    {config.gradient_checkpointing}")
     print()
     print("=" * 60)
 
-print_banner()
-
-if USE_LIGER:
-    print("Liger kernels imported successfully.")
-else:
-    print("Liger kernels not found. Falling back to standard implementations.")
 
 # Tokenizer
 tokenizer = Tokenizer()
 
 # Data Loading
-def collate_fn(batch):
-    texts = [tokenizer.encode(item['text'])[:config.block_size+1] for item in batch]
+def collate_fn(batch, block_size):
+    texts = [tokenizer.encode(item['text'])[:block_size+1] for item in batch]
 
     input_ids = []
     targets = []
@@ -105,10 +157,10 @@ def collate_fn(batch):
         tgt = text[1:]
 
         # Padding
-        if len(inp) < config.block_size:
-            inp = inp + [tokenizer.pad_id] * (config.block_size - len(inp))
-        if len(tgt) < config.block_size:
-            tgt = tgt + [tokenizer.pad_id] * (config.block_size - len(tgt))
+        if len(inp) < block_size:
+            inp = inp + [tokenizer.pad_id] * (block_size - len(inp))
+        if len(tgt) < block_size:
+            tgt = tgt + [tokenizer.pad_id] * (block_size - len(tgt))
 
         input_ids.append(torch.tensor(inp, dtype=torch.long))
         targets.append(torch.tensor(tgt, dtype=torch.long))
@@ -120,22 +172,23 @@ def collate_fn(batch):
         'target': torch.stack(targets)
     }
 
-def prepare_data():
-    # Stream OpenWebText — no full download needed
+def prepare_data(config):
+    # Stream FineWeb-Edu — no full download needed
     ds = datasets.load_dataset(
-        "Skylion007/openwebtext", split="train", streaming=True, trust_remote_code=False
+        "HuggingFaceFW/fineweb-edu", name="default", split="train", streaming=True, trust_remote_code=False
     )
-    ds = ds.shuffle(seed=42, buffer_size=10_000)
+    ds = ds.shuffle(seed=42, buffer_size=1_000)
 
     train_loader = DataLoader(
-        ds, batch_size=config.batch_size, collate_fn=collate_fn,
-        num_workers=2, pin_memory=True
+        ds, batch_size=config.batch_size,
+        collate_fn=lambda batch: collate_fn(batch, config.block_size),
+        num_workers=0, pin_memory=True
     )
 
     return train_loader
 
 # Training Loop
-def evaluate(model, train_loader_iter):
+def evaluate(model, val_iter, config):
     """Run evaluation on a few batches from the stream."""
     model.eval()
     val_loss = 0
@@ -143,7 +196,7 @@ def evaluate(model, train_loader_iter):
     with torch.inference_mode():
         for _ in range(config.eval_iters):
             try:
-                batch = next(train_loader_iter)
+                batch = next(val_iter)
             except StopIteration:
                 break
             if batch is None:
@@ -158,24 +211,41 @@ def evaluate(model, train_loader_iter):
     return val_loss / max(count, 1)
 
 
-def find_latest_checkpoint():
+def find_latest_checkpoint(checkpoint_dir):
     """Find the most recent checkpoint in the checkpoint directory."""
-    if not os.path.exists(config.checkpoint_dir):
+    if not os.path.exists(checkpoint_dir):
         return None
-    ckpts = [f for f in os.listdir(config.checkpoint_dir) if f.startswith("ckpt_step") and f.endswith(".pth")]
+    # Check for emergency checkpoint first, then step checkpoints
+    ckpts = [f for f in os.listdir(checkpoint_dir) if f.endswith(".pth")]
     if not ckpts:
         return None
-    # Extract step numbers and find the latest
-    ckpts.sort(key=lambda f: int(f.replace("ckpt_step", "").replace(".pth", "")))
-    return os.path.join(config.checkpoint_dir, ckpts[-1])
+    # Prefer step checkpoints over emergency
+    step_ckpts = [f for f in ckpts if f.startswith("ckpt_step")]
+    if step_ckpts:
+        step_ckpts.sort(key=lambda f: int(f.replace("ckpt_step", "").replace(".pth", "")))
+        return os.path.join(checkpoint_dir, step_ckpts[-1])
+    # Fall back to emergency checkpoint
+    if "ckpt_emergency.pth" in ckpts:
+        return os.path.join(checkpoint_dir, "ckpt_emergency.pth")
+    return None
 
 
-def train(resume=False):
+def train(resume=False, config_name="default"):
+    model_config, train_params = get_config(config_name)
+    config = Config(model_config, train_params)
+
+    print_banner(config, config_name)
+
+    if USE_LIGER:
+        print("Liger kernels imported successfully.")
+    else:
+        print("Liger kernels not found. Falling back to standard implementations.")
+
     os.makedirs(config.checkpoint_dir, exist_ok=True)
 
     # Initialize CSV file for logging (append if resuming)
     csv_path = os.path.join(config.checkpoint_dir, "training_metrics.csv")
-    existing_ckpt = find_latest_checkpoint()
+    existing_ckpt = find_latest_checkpoint(config.checkpoint_dir)
     if resume and not existing_ckpt:
         print("--resume passed but no checkpoint found. Starting from scratch.")
     if not resume and existing_ckpt:
@@ -191,20 +261,26 @@ def train(resume=False):
         csv_writer.writerow(['opt_step', 'train_loss', 'val_loss', 'train_perplexity', 'val_perplexity',
                              'learning_rate', 'tokens_per_sec', 'avg_tokens_per_sec', 'total_tokens_processed', 'elapsed_time', 'generated_text'])
 
-    train_loader = prepare_data()
+    train_loader = prepare_data(config)
     train_iter = iter(train_loader)
 
-    # Separate validation stream (re-open without shuffle so it's deterministic)
+    # Separate validation stream (skip ahead to use different data for val)
     val_ds = datasets.load_dataset(
-        "Skylion007/openwebtext", split="train", streaming=True, trust_remote_code=False
-    ).skip(8_000_000)  # skip ahead to use different data for val
+        "HuggingFaceFW/fineweb-edu", name="default", split="train", streaming=True, trust_remote_code=False
+    ).skip(8_000_000)
     val_loader = DataLoader(
-        val_ds, batch_size=config.batch_size, collate_fn=collate_fn,
-        num_workers=1, pin_memory=True
+        val_ds, batch_size=config.batch_size,
+        collate_fn=lambda batch: collate_fn(batch, config.block_size),
+        num_workers=0, pin_memory=True
     )
     val_iter = iter(val_loader)
 
     model = TinyGPT2(model_config, pad_id=tokenizer.pad_id).to(config.device)
+
+    # Enable gradient checkpointing for large models
+    if config.gradient_checkpointing:
+        model.gradient_checkpointing = True
+        print("Gradient checkpointing enabled.")
 
     if USE_LIGER:
         print("Using Liger kernels for RMSNorm.")
@@ -213,14 +289,14 @@ def train(resume=False):
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1_000_000:.2f}M")
 
-    optimizer = torch.optim.AdamW(
+    # 8-bit AdamW optimizer (bitsandbytes) — halves optimizer memory
+    optimizer = bnb.optim.AdamW8bit(
         model.parameters(), lr=config.learning_rate,
         weight_decay=config.weight_decay, betas=(config.beta1, config.beta2),
-        fused=config.use_fused
     )
 
     scheduler = lr_scheduler.OneCycleLR(
-        optimizer, max_lr=8e-4, total_steps=config.max_steps, pct_start=0.05
+        optimizer, max_lr=config.max_lr, total_steps=config.max_steps, pct_start=0.05
     )
 
     # --- Resume from checkpoint if available ---
@@ -231,8 +307,8 @@ def train(resume=False):
 
     if resume_ckpt:
         print(f"Resuming from checkpoint: {resume_ckpt}")
-        ckpt = torch.load(resume_ckpt, map_location=config.device, weights_only=False)
-        # Strip _orig_mod. prefix added by torch.compile
+        # Load to CPU first to avoid VRAM spike
+        ckpt = torch.load(resume_ckpt, map_location="cpu", weights_only=False)
         state_dict = ckpt['model_state_dict']
         state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
         model.load_state_dict(state_dict)
@@ -242,6 +318,8 @@ def train(resume=False):
         total_tokens_processed = ckpt.get('total_tokens_processed', 0)
         train_losses = ckpt.get('train_losses', [])
         val_losses = ckpt.get('val_losses', [])
+        del ckpt
+        torch.cuda.empty_cache()
         print(f"Resumed at optimizer step {start_opt_step}, {total_tokens_processed:,} tokens processed so far")
     else:
         print("No checkpoint found, starting from scratch.")
@@ -266,113 +344,128 @@ def train(resume=False):
     opt_step = start_opt_step
     running_loss = 0.0
 
-    while opt_step < config.max_steps:
-        # --- Micro-step ---
-        try:
-            batch = next(train_iter)
-        except StopIteration:
-            # Stream exhausted — restart
-            train_loader = prepare_data()
-            train_iter = iter(train_loader)
-            batch = next(train_iter)
+    def save_checkpoint(step, loss_val=None, val_loss_val=None, emergency=False):
+        """Save a checkpoint. Used for regular saves and emergency exits."""
+        tag = "emergency" if emergency else f"step{step}"
+        ckpt_path = os.path.join(config.checkpoint_dir, f"ckpt_{tag}.pth")
+        ckpt = {
+            'opt_step': step,
+            'model_state_dict': {k.replace("_orig_mod.", ""): v for k, v in model.state_dict().items()},
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'train_loss': loss_val,
+            'val_loss': val_loss_val,
+            'train_losses': train_losses,
+            'val_losses': val_losses,
+            'total_tokens_processed': total_tokens_processed,
+            'config': {k: v for k, v in inspect.getmembers(config) if not k.startswith('__')}
+        }
+        torch.save(ckpt, ckpt_path)
+        print(f"\n{'Emergency checkpoint' if emergency else 'Checkpoint'} saved to {ckpt_path}")
 
-        if batch is None:
-            continue
+    try:
+        while opt_step < config.max_steps:
+            # --- Micro-step ---
+            try:
+                batch = next(train_iter)
+            except StopIteration:
+                # Stream exhausted — restart
+                train_loader = prepare_data(config)
+                train_iter = iter(train_loader)
+                batch = next(train_iter)
 
-        t0 = time.time()
+            if batch is None:
+                continue
 
-        inputs = batch['input'].to(config.device, non_blocking=True)
-        targets = batch['target'].to(config.device, non_blocking=True)
+            t0 = time.time()
 
-        num_tokens = inputs.shape[0] * inputs.shape[1]
-        total_tokens_processed += num_tokens
+            inputs = batch['input'].to(config.device, non_blocking=True)
+            targets = batch['target'].to(config.device, non_blocking=True)
 
-        with torch.autocast(device_type=config.device, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
-            _, loss, _ = model(inputs, targets)
+            num_tokens = inputs.shape[0] * inputs.shape[1]
+            total_tokens_processed += num_tokens
 
-        original_loss = loss.item()
-        running_loss += original_loss
-        loss = loss / config.gradient_accumulation_steps
-        loss.backward()
+            with torch.autocast(device_type=config.device, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
+                _, loss, _ = model(inputs, targets)
 
-        train_losses.append(original_loss)
-        if len(train_losses) > 10000:
-            train_losses = train_losses[-5000:]
+            original_loss = loss.item()
+            running_loss += original_loss
+            loss = loss / config.gradient_accumulation_steps
+            loss.backward()
 
-        micro_step += 1
+            train_losses.append(original_loss)
+            if len(train_losses) > 10000:
+                train_losses = train_losses[-5000:]
 
-        # --- Optimizer step ---
-        if micro_step % config.gradient_accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            scheduler.step()
-            opt_step += 1
-            pbar.update(1)
+            micro_step += 1
 
-            avg_micro_loss = running_loss / config.gradient_accumulation_steps
-            running_loss = 0.0
+            # --- Optimizer step ---
+            if micro_step % config.gradient_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                scheduler.step()
+                opt_step += 1
+                pbar.update(1)
 
-            t1 = time.time()
-            tokens_per_sec = (num_tokens * config.gradient_accumulation_steps) / max(t1 - t0, 1e-6)
-            pbar.set_description(f"Loss: {avg_micro_loss:.4f} | {tokens_per_sec:.0f} tok/s")
+                avg_micro_loss = running_loss / config.gradient_accumulation_steps
+                running_loss = 0.0
 
-            # --- Evaluation & checkpoint ---
-            if opt_step % config.eval_interval == 0:
-                val_loss = evaluate(model, val_iter)
-                val_losses.append(val_loss)
+                t1 = time.time()
+                tokens_per_sec = (num_tokens * config.gradient_accumulation_steps) / max(t1 - t0, 1e-6)
+                pbar.set_description(f"Loss: {avg_micro_loss:.4f} | {tokens_per_sec:.0f} tok/s")
 
-                train_perplexity = math.exp(min(avg_micro_loss, 20))
-                val_perplexity = math.exp(min(val_loss, 20))
+                # --- Evaluation & checkpoint ---
+                if opt_step % config.eval_interval == 0:
+                    val_loss = evaluate(model, val_iter, config)
+                    val_losses.append(val_loss)
 
-                elapsed_time = time.time() - start_time
-                avg_tokens_per_sec = total_tokens_processed / elapsed_time if elapsed_time > 0 else 0
-                current_lr = optimizer.param_groups[0]['lr']
+                    train_perplexity = math.exp(min(avg_micro_loss, 20))
+                    val_perplexity = math.exp(min(val_loss, 20))
 
-                print(f"\n[Step {opt_step}] Train Loss {avg_micro_loss:.4f}, Val Loss {val_loss:.4f}")
-                print(f"Train PPL: {train_perplexity:.2f}, Val PPL: {val_perplexity:.2f}")
-                print(f"Elapsed: {elapsed_time:.1f}s, Avg throughput: {avg_tokens_per_sec:.0f} tok/s")
-                print(f"Total tokens: {total_tokens_processed:,}")
+                    elapsed_time = time.time() - start_time
+                    avg_tokens_per_sec = total_tokens_processed / elapsed_time if elapsed_time > 0 else 0
+                    current_lr = optimizer.param_groups[0]['lr']
 
-                # Generate sample text
-                with torch.inference_mode():
-                    prompt = "The meaning of life is"
-                    prompt_tokens = tokenizer.encode(prompt)
-                    prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long).to(config.device)
-                    print(f"\nGenerated: {prompt}", end="", flush=True)
-                    generated = model.generate(prompt_tensor, max_new_tokens=50, temperature=0.8, top_k=40, tokenizer=tokenizer, stream=True)
-                    generated_text = tokenizer.decode(generated[0].tolist())
-                    print()  # blank line after generation
+                    print(f"\n[Step {opt_step}] Train Loss {avg_micro_loss:.4f}, Val Loss {val_loss:.4f}")
+                    print(f"Train PPL: {train_perplexity:.2f}, Val PPL: {val_perplexity:.2f}")
+                    print(f"Elapsed: {elapsed_time:.1f}s, Avg throughput: {avg_tokens_per_sec:.0f} tok/s")
+                    print(f"Total tokens: {total_tokens_processed:,}")
 
-                csv_writer.writerow([opt_step, avg_micro_loss, val_loss, train_perplexity, val_perplexity,
-                                    current_lr, tokens_per_sec, avg_tokens_per_sec, total_tokens_processed, elapsed_time, generated_text])
-                csv_file.flush()
+                    # Generate sample text with random prompt
+                    with torch.inference_mode():
+                        prompt = random.choice(EVAL_PROMPTS)
+                        prompt_tokens = tokenizer.encode(prompt)
+                        prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long).to(config.device)
+                        print(f"\nGenerated: {prompt}", end="", flush=True)
+                        generated = model.generate(prompt_tensor, max_new_tokens=50, temperature=0.8, top_k=40, tokenizer=tokenizer, stream=True)
+                        generated_text = tokenizer.decode(generated[0].tolist())
+                        print()  # blank line after generation
 
-                # Save checkpoint
-                ckpt_path = os.path.join(config.checkpoint_dir, f"ckpt_step{opt_step}.pth")
-                checkpoint = {
-                    'opt_step': opt_step,
-                    'model_state_dict': {k.replace("_orig_mod.", ""): v for k, v in model.state_dict().items()},
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'train_loss': avg_micro_loss,
-                    'val_loss': val_loss,
-                    'train_losses': train_losses,
-                    'val_losses': val_losses,
-                    'total_tokens_processed': total_tokens_processed,
-                    'config': {k: v for k, v in inspect.getmembers(config) if not k.startswith('__')}
-                }
-                torch.save(checkpoint, ckpt_path)
-                print(f"Checkpoint saved to {ckpt_path}")
+                    csv_writer.writerow([opt_step, avg_micro_loss, val_loss, train_perplexity, val_perplexity,
+                                        current_lr, tokens_per_sec, avg_tokens_per_sec, total_tokens_processed, elapsed_time, generated_text])
+                    csv_file.flush()
 
-                model.train()
+                    save_checkpoint(opt_step, avg_micro_loss, val_loss)
+                    model.train()
 
-    pbar.close()
-    csv_file.close()
+    except KeyboardInterrupt:
+        print("\n\nTraining interrupted by user (Ctrl+C).")
+        save_checkpoint(opt_step, emergency=True)
+    except Exception as e:
+        print(f"\n\nTraining crashed: {e}")
+        save_checkpoint(opt_step, emergency=True)
+        raise
+    finally:
+        pbar.close()
+        csv_file.close()
+
     print(f"\nTraining complete. Metrics saved to {csv_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint")
+    parser.add_argument("--config", type=str, default="default", choices=["default", "v2.1"],
+                        help="Model config: 'default' (95M) or 'v2.1' (183M)")
     args = parser.parse_args()
-    train(resume=args.resume)
+    train(resume=args.resume, config_name=args.config)

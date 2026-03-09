@@ -9,7 +9,7 @@ if os.name == 'posix' and torch.cuda.is_available():
 else:
     LigerFusedLinearCrossEntropyLoss = None
 
-from tinygpt.config import GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig, TinyGPT2Config
+from tinygpt.config import GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig, TinyGPT2Config, TinyGPT2_1Config
 from tinygpt.layers import DecoderBlock, CausalMoEBlock, RotaryEmbeddings, WikipediaCausalMoEBlock, TinyGPT2Block, get_rms_norm, precompute_freqs_cis
 from tinygpt.utils import remove_orig_mod_prefix, map_swiglu_keys
 
@@ -263,6 +263,7 @@ class TinyGPT2(nn.Module):
         super().__init__()
         self.config = config
         self.block_size = config.block_size
+        self.gradient_checkpointing = False
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=pad_id)
         self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
 
@@ -301,7 +302,12 @@ class TinyGPT2(nn.Module):
 
         for i, block in enumerate(self.blocks):
             kv_cache = kv_caches[i] if kv_caches else None
-            x, new_cache = block(x, freqs_cis, is_causal=is_causal, kv_cache=kv_cache)
+            if self.gradient_checkpointing and self.training and kv_cache is None:
+                x, new_cache = torch.utils.checkpoint.checkpoint(
+                    block, x, freqs_cis, is_causal, kv_cache, use_reentrant=False
+                )
+            else:
+                x, new_cache = block(x, freqs_cis, is_causal=is_causal, kv_cache=kv_cache)
             new_kv_caches.append(new_cache)
 
         x = self.ln_f(x)
@@ -396,10 +402,11 @@ class TinyGPT2(nn.Module):
         return idx
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_path: str, device: str = "cpu") -> "TinyGPT2":
+    def from_pretrained(cls, pretrained_model_path: str, device: str = "cpu", config=None) -> "TinyGPT2":
         from tinygpt.tokenizer import Tokenizer
 
-        config = TinyGPT2Config()
+        if config is None:
+            config = TinyGPT2Config()
         tokenizer = Tokenizer()
         model = cls(config, pad_id=tokenizer.pad_id)
 

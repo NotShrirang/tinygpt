@@ -8,16 +8,49 @@ import math
 import time
 import csv
 import inspect
+import random
 import tqdm
 from datasets import load_dataset
-from tinygpt import TinyGPT2, TinyGPT2Config, Tokenizer
+from tinygpt import TinyGPT2, TinyGPT2Config, TinyGPT2_1Config, Tokenizer
 
 
 # SFT Prompt Template
-def format_prompt(instruction, input_text=""):
+def format_prompt(instruction, input_text="", system=""):
+    parts = []
+    if system.strip():
+        parts.append(f"### System:\n{system}")
+    parts.append(f"### Instruction:\n{instruction}")
     if input_text.strip():
-        return f"### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:\n"
-    return f"### Instruction:\n{instruction}\n\n### Response:\n"
+        parts.append(f"### Input:\n{input_text}")
+    parts.append("### Response:\n")
+    return "\n\n".join(parts)
+
+
+# Random validation prompts pool
+EVAL_PROMPTS = [
+    "What is the capital of France?",
+    "Explain photosynthesis in simple terms.",
+    "Write a short poem about the ocean.",
+    "What are the benefits of regular exercise?",
+    "Summarize the theory of relativity.",
+    "How does a computer work?",
+    "What is the difference between a virus and a bacteria?",
+    "Explain what machine learning is.",
+    "Write a haiku about spring.",
+    "What causes earthquakes?",
+    "List three interesting facts about space.",
+    "How do airplanes fly?",
+    "What is democracy?",
+    "Explain the water cycle.",
+    "What is the largest planet in our solar system?",
+]
+
+
+def get_model_config(config_name):
+    """Get model config by name."""
+    if config_name == "v2.1":
+        return TinyGPT2_1Config()
+    return TinyGPT2Config()
 
 
 class AlpacaSFTDataset(Dataset):
@@ -29,14 +62,11 @@ class AlpacaSFTDataset(Dataset):
 
         for item in data:
             prompt = format_prompt(item['instruction'], item.get('input', ''))
-            response = item['output'] + "<|endoftext|>"
-
             prompt_tokens = tokenizer.encode(prompt)
-            response_tokens = tokenizer.encode(response)
+            response_tokens = tokenizer.encode(item['output']) + [tokenizer.eos_id]
 
             full_tokens = prompt_tokens + response_tokens
             if len(full_tokens) > block_size:
-                # Truncate but keep at least some response
                 max_prompt = block_size - min(len(response_tokens), block_size // 2)
                 prompt_tokens = prompt_tokens[:max_prompt]
                 remaining = block_size - len(prompt_tokens)
@@ -68,11 +98,75 @@ class AlpacaSFTDataset(Dataset):
         return self.examples[idx]
 
 
-def load_pretrained(checkpoint_path, device):
+class SlimOrcaSFTDataset(Dataset):
+    def __init__(self, data, tokenizer, block_size):
+        self.examples = []
+        self.tokenizer = tokenizer
+        self.block_size = block_size
+        self.pad_id = tokenizer.pad_id
+
+        for item in data:
+            conversations = item['conversations']
+
+            # Extract system, human, gpt messages
+            system_msg = ""
+            human_msg = ""
+            gpt_msg = ""
+            for msg in conversations:
+                if msg['from'] == 'system':
+                    system_msg = msg['value']
+                elif msg['from'] == 'human':
+                    human_msg = msg['value']
+                elif msg['from'] == 'gpt':
+                    gpt_msg = msg['value']
+
+            if not human_msg or not gpt_msg:
+                continue
+
+            prompt = format_prompt(human_msg, system=system_msg)
+            prompt_tokens = tokenizer.encode(prompt)
+            response_tokens = tokenizer.encode(gpt_msg) + [tokenizer.eos_id]
+
+            full_tokens = prompt_tokens + response_tokens
+            if len(full_tokens) > block_size:
+                max_prompt = block_size - min(len(response_tokens), block_size // 2)
+                prompt_tokens = prompt_tokens[:max_prompt]
+                remaining = block_size - len(prompt_tokens)
+                response_tokens = response_tokens[:remaining]
+                full_tokens = prompt_tokens + response_tokens
+
+            # Create labels: -100 for prompt tokens (no loss), actual tokens for response
+            labels = [-100] * len(prompt_tokens) + response_tokens
+
+            # Shift for next-token prediction
+            input_ids = full_tokens[:-1]
+            target_ids = labels[1:]
+
+            # Pad to block_size
+            pad_len = block_size - len(input_ids)
+            if pad_len > 0:
+                input_ids = input_ids + [self.pad_id] * pad_len
+                target_ids = target_ids + [-100] * pad_len
+
+            self.examples.append({
+                'input_ids': torch.tensor(input_ids, dtype=torch.long),
+                'labels': torch.tensor(target_ids, dtype=torch.long),
+            })
+
+    def __len__(self):
+        return len(self.examples)
+
+    def __getitem__(self, idx):
+        return self.examples[idx]
+
+
+def load_pretrained(checkpoint_path, device, config_name="default"):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    saved_config = checkpoint['config']
-    config = TinyGPT2Config()
+    config = get_model_config(config_name)
+
+    # Override config from checkpoint if available
+    saved_config = checkpoint.get('config', {})
     for k, v in saved_config.items():
         if hasattr(config, k):
             setattr(config, k, v)
@@ -93,13 +187,14 @@ def load_pretrained(checkpoint_path, device):
     }
 
 
-def print_banner(args, config, info, train_size, val_size, total_steps):
+def print_banner(args, config, info, dataset_name, train_size, val_size, total_steps):
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
     vram = f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB" if torch.cuda.is_available() else "N/A"
     tokens_per_step = args.batch_size * args.gradient_accumulation_steps * config.block_size
 
     print(f"\n{'='*60}")
     print(f"  TinyGPT — Supervised Fine-Tuning (SFT)")
+    print(f"  Model: TinyGPT2 {'v2.1 (~315M)' if args.config == 'v2.1' else 'default (~95M)'}")
     print(f"{'='*60}")
     print(f"  Device:         {device_name} ({vram} VRAM)")
     print(f"\n  Pretrained Checkpoint:")
@@ -108,7 +203,7 @@ def print_banner(args, config, info, train_size, val_size, total_steps):
     print(f"    Train Loss:   {info['train_loss']:.4f}" if isinstance(info['train_loss'], float) else f"    Train Loss:   {info['train_loss']}")
     print(f"    Val Loss:     {info['val_loss']:.4f}" if isinstance(info['val_loss'], float) else f"    Val Loss:     {info['val_loss']}")
     print(f"    Parameters:   {info['params'] / 1e6:.2f}M")
-    print(f"\n  Dataset:        Stanford Alpaca (52K)")
+    print(f"\n  Dataset:        {dataset_name}")
     print(f"    Train:        {train_size:,} examples")
     print(f"    Val:          {val_size:,} examples")
     print(f"\n  SFT Config:")
@@ -147,7 +242,9 @@ def evaluate(model, val_loader, device, dtype):
     return total_loss / count if count > 0 else float('inf')
 
 
-def generate_sample(model, tokenizer, device, prompt_text="What is the capital of France?"):
+def generate_sample(model, tokenizer, device, prompt_text=None):
+    if prompt_text is None:
+        prompt_text = random.choice(EVAL_PROMPTS)
     prompt = format_prompt(prompt_text)
     prompt_tokens = tokenizer.encode(prompt)
     prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long).to(device)
@@ -155,7 +252,8 @@ def generate_sample(model, tokenizer, device, prompt_text="What is the capital o
     with torch.inference_mode():
         generated = model.generate(
             prompt_tensor, max_new_tokens=100, temperature=0.7,
-            top_k=40, tokenizer=tokenizer, stream=True
+            top_k=40, tokenizer=tokenizer, stream=True,
+            eos_token_id=tokenizer.eos_id,
         )
     generated_text = tokenizer.decode(generated[0].tolist())
     print()
@@ -166,17 +264,28 @@ def train(args):
     device = args.device or ('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Load pretrained model
-    model, tokenizer, config, info = load_pretrained(args.checkpoint, device)
+    model, tokenizer, config, info = load_pretrained(args.checkpoint, device, args.config)
 
-    # Load Alpaca dataset
-    print("Loading Alpaca dataset...")
-    ds = load_dataset("tatsu-lab/alpaca", split="train")
-    ds = ds.train_test_split(test_size=0.1, seed=42)
-    train_data = ds['train']
-    val_data = ds['test']
-
-    train_dataset = AlpacaSFTDataset(train_data, tokenizer, config.block_size)
-    val_dataset = AlpacaSFTDataset(val_data, tokenizer, config.block_size)
+    # Load dataset
+    dataset_name = args.dataset
+    if dataset_name == "slimorca":
+        print("Loading SlimOrca dataset...")
+        ds = load_dataset("Open-Orca/SlimOrca", split="train")
+        ds = ds.train_test_split(test_size=0.05, seed=42)
+        train_data = ds['train']
+        val_data = ds['test']
+        train_dataset = SlimOrcaSFTDataset(train_data, tokenizer, config.block_size)
+        val_dataset = SlimOrcaSFTDataset(val_data, tokenizer, config.block_size)
+        dataset_display = f"Open-Orca/SlimOrca ({len(train_dataset) + len(val_dataset):,})"
+    else:  # alpaca
+        print("Loading Alpaca dataset...")
+        ds = load_dataset("tatsu-lab/alpaca", split="train")
+        ds = ds.train_test_split(test_size=0.1, seed=42)
+        train_data = ds['train']
+        val_data = ds['test']
+        train_dataset = AlpacaSFTDataset(train_data, tokenizer, config.block_size)
+        val_dataset = AlpacaSFTDataset(val_data, tokenizer, config.block_size)
+        dataset_display = f"Stanford Alpaca ({len(train_dataset) + len(val_dataset):,})"
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
@@ -184,7 +293,7 @@ def train(args):
     steps_per_epoch = len(train_loader) // args.gradient_accumulation_steps
     total_steps = steps_per_epoch * args.epochs
 
-    print_banner(args, config, info, len(train_dataset), len(val_dataset), total_steps)
+    print_banner(args, config, info, dataset_display, len(train_dataset), len(val_dataset), total_steps)
 
     # Loss function with -100 masking (ignores prompt tokens)
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
@@ -313,7 +422,7 @@ def train(args):
                     print(f"Elapsed: {elapsed_time:.1f}s, Avg throughput: {avg_tokens_per_sec:.0f} tok/s")
                     print(f"Total tokens: {total_tokens_processed:,}")
 
-                    # Generate sample text
+                    # Generate sample text with random prompt
                     generated_text = generate_sample(model, tokenizer, device)
 
                     csv_writer.writerow([epoch+1, global_step, avg_loss, val_loss, train_perplexity, val_perplexity,
@@ -383,6 +492,10 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Gradient accumulation steps (default: 8)")
     parser.add_argument("--eval_interval", type=int, default=100, help="Evaluate every N optimizer steps (default: 100)")
     parser.add_argument("--device", type=str, default=None, help="Device: cuda or cpu (default: auto)")
+    parser.add_argument("--config", type=str, default="default", choices=["default", "v2.1"],
+                        help="Model config: 'default' (95M) or 'v2.1' (315M)")
+    parser.add_argument("--dataset", type=str, default="slimorca", choices=["slimorca", "alpaca"],
+                        help="SFT dataset: 'slimorca' (500K) or 'alpaca' (52K)")
     args = parser.parse_args()
 
     train(args)

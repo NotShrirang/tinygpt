@@ -66,3 +66,18 @@ class TinyGPT2Config:
     weight_decay: float = 1e-1
     beta1: float = 0.9
     beta2: float = 0.95
+
+@dataclass
+class TinyGPT2_1Config:
+    vocab_size: int = 50304
+    block_size: int = 512
+    n_embd: int = 1024
+    n_head: int = 16
+    n_layer: int = 12
+    gqa_kv_head: int = 4
+    hidden_size: int = 4096
+    dropout: float = 0.1
+
+    weight_decay: float = 1e-1
+    beta1: float = 0.9
+    beta2: float = 0.95
