@@ -18,7 +18,7 @@
 
 ## Overview 🔍
 
-TinyGPT represents a carefully crafted balance between **accessibility** and **performance** in language model design. The project progresses through five model variants — from a standard GPT to Mixture-of-Experts architectures to an instruction fine-tuned TinyGPT-2 model with cutting-edge techniques.
+TinyGPT represents a carefully crafted balance between **accessibility** and **performance** in language model design. The project progresses through multiple model variants — from a standard GPT to Mixture-of-Experts architectures to instruction fine-tuned and preference-aligned TinyGPT2 models with cutting-edge techniques including DPO alignment.
 
 ### 🎯 **Project Goals**
 
@@ -84,14 +84,35 @@ TinyGPT comes in five variants:
 - Parameters: ~95M
 - Training data: OpenWebText (~6.5B+ tokens)
 
+### TinyGPT2.1 ⚡⚡
+
+- 12 transformer blocks 🧱
+- 16 attention heads with Grouped Query Attention (4 KV groups) 👁️
+- 1024 embedding dimensions 📊
+- 4096 FFN hidden size 🔧
+- Same architecture as TinyGPT2 (RoPE, GQA, RMSNorm, KV Cache, weight tying)
+- Vocabulary size of 50,304 tokens 📚
+- Context window of 512 tokens 🪟
+- Parameters: ~183M
+- Training data: FineWeb-Edu (~8B tokens, streamed)
+- Gradient checkpointing + 8-bit AdamW for memory efficiency
+
 ### TinyGPT2-SFT (Instruction Fine-Tuned) 💬
 
-- **Base model**: TinyGPT2 (~95M parameters)
-- **Fine-tuning data**: Stanford Alpaca (52K instruction-response pairs)
-- **Training**: 3 epochs with response-only loss masking
+- **Base model**: TinyGPT2 (~95M parameters) or TinyGPT2.1 (~183M parameters)
+- **Fine-tuning data**: Stanford Alpaca (52K) or SlimOrca (500K instruction-response pairs)
+- **Training**: Response-only loss masking
 - **Prompt format**: `### Instruction: ... ### Response: ...`
 - **Capabilities**: Follows instructions, answers questions, writes creatively
-- **Hardware**: Single NVIDIA RTX 3070 Ti (8GB VRAM), ~85 minutes total
+- **Hardware**: Single NVIDIA RTX 3070 Ti (8GB VRAM)
+
+### TinyGPT2-DPO (Preference Aligned) 🎯
+
+- **Base model**: Any TinyGPT2-SFT checkpoint
+- **Alignment data**: Anthropic HH-RLHF (~160K preference pairs)
+- **Method**: Direct Preference Optimization (DPO)
+- **Training**: Learns to prefer helpful/harmless responses over rejected ones
+- **Hardware**: Single NVIDIA RTX 3070 Ti (8GB VRAM)
 
 ## Datasets 📖
 
@@ -101,12 +122,15 @@ TinyGPT comes in five variants:
 | TinyGPT-MoE   | TinyStories           | ~300M  |
 | Wikipedia-MoE | Wikipedia (C4)        | ~500M  |
 | TinyGPT2      | OpenWebText           | ~6.7B  |
-| TinyGPT2-SFT  | Stanford Alpaca (52K) | ~72M   |
+| TinyGPT2.1    | FineWeb-Edu           | ~8B    |
+| TinyGPT2-SFT  | Alpaca (52K) / SlimOrca (500K) | ~72M / ~500M |
+| TinyGPT2-DPO  | Anthropic HH-RLHF    | ~160K pairs |
 
 ### Training Data Improvements 📈
 
-- **Scale**: TinyGPT2 is trained on 3.4B+ tokens from OpenWebText, significantly enhancing its general language understanding.
+- **Scale**: TinyGPT2 is trained on 6.7B+ tokens from OpenWebText; TinyGPT2.1 on ~8B tokens from FineWeb-Edu (educational web content).
 - **Data Processing**: Efficient data loading with HuggingFace `datasets` and tiktoken tokenization for fast throughput.
+- **Streaming**: FineWeb-Edu is streamed directly — no disk storage required.
 
 ## Installation 💿
 
@@ -166,13 +190,15 @@ For detailed Docker usage, see `DOCKER.md`.
 
 ### Model Selection 🎯
 
-Choose from five model variants:
+Choose from multiple model variants:
 
 - **TinyGPT**: Standard 51M parameter model for story generation
 - **TinyGPT-MoE**: 85M parameter MoE model with enhanced storytelling
 - **Wikipedia-MoE**: 135M parameter MoE model trained on Wikipedia
 - **TinyGPT2**: 95M parameter modern GPT with RoPE, GQA, and RMSNorm
-- **TinyGPT2-SFT**: TinyGPT2 instruction fine-tuned on Alpaca — follows instructions and answers questions
+- **TinyGPT2.1**: 183M parameter scaled model pretrained on FineWeb-Edu
+- **TinyGPT2-SFT**: Instruction fine-tuned on Alpaca (52K) or SlimOrca (500K)
+- **TinyGPT2-DPO**: Preference-aligned with Anthropic HH-RLHF
 
 ### Quick Start Options
 
@@ -192,26 +218,56 @@ This launches a web application where you can:
 #### Option 2: CLI Inference (TinyGPT2)
 
 ```bash
-# SFT model (default) — wraps prompts in instruction template
+# Chat mode (default) — multi-turn conversation with memory
 python inference.py --checkpoint checkpoints_sft/sft_epoch2.pth
 
-# Pretrained model — raw text completion
-python inference.py --checkpoint checkpoints/ckpt_step25500.pth --raw
+# Instruction mode — single-turn, no memory
+python inference.py --checkpoint checkpoints_sft/sft_epoch2.pth --mode instruction
 
-# Single prompt
+# Raw mode — direct text completion, no template
+python inference.py --checkpoint checkpoints/ckpt_step25500.pth --mode raw
+
+# TinyGPT2.1 model
+python inference.py --checkpoint checkpoints_v2.1/ckpt_step5000.pth --config v2.1
+
+# Single prompt (non-interactive)
 python inference.py --checkpoint checkpoints_sft/sft_epoch2.pth --prompt "What is the capital of France?"
 
 # With custom settings
 python inference.py --checkpoint checkpoints_sft/sft_epoch2.pth --max_tokens 200 --temperature 0.7 --top_k 40
+
+# With a system prompt
+python inference.py --checkpoint checkpoints_sft/sft_epoch2.pth --system "You are a helpful assistant."
 ```
 
 Features:
 
+- **Chat mode** (default): Multi-turn conversations with runtime memory — the model sees the full conversation history
+- **Instruction mode**: Single-turn instruction following
+- **Raw mode**: Direct text completion without any template
 - KV cache for fast autoregressive generation
 - Streaming token-by-token output with EOS detection
-- Interactive REPL mode
-- Instruction template (default) or raw mode (`--raw`)
+- Arrow key editing and up/down history navigation (persisted across sessions)
+- Tab completion for slash commands
 - Checkpoint info display (step, loss, tokens seen)
+
+**Slash commands** (in interactive mode):
+
+| Command | Description |
+|---|---|
+| `/help` | Show all commands |
+| `/info` | Model info + current settings |
+| `/mode <chat\|instruction\|raw>` | Switch mode |
+| `/new` | Start a new chat (clears context) |
+| `/temp <value>` | Set temperature |
+| `/topk <value>` | Set top-k sampling |
+| `/max <value>` | Set max generation tokens |
+| `/system <text>` | Set/clear system prompt |
+| `/history` | Show prompt history |
+| `/clear` | Clear history and chat context |
+| `/last` | Repeat the last generation |
+| `/load <path>` | Load a different checkpoint |
+| `/quit` | Exit |
 
 #### Option 3: FastAPI Service (Production REST API)
 
@@ -266,30 +322,40 @@ Trained using PyTorch on their respective datasets. See the training notebooks i
 TinyGPT2 is pretrained on OpenWebText using `train_liger.py`:
 
 ```bash
-# Start training from scratch
+# TinyGPT2 (95M) — default config
 python train_liger.py
+
+# TinyGPT2.1 (183M) — scaled config with FineWeb-Edu + 8-bit AdamW
+python train_liger.py --config v2.1
 
 # Resume from checkpoint
 python train_liger.py --resume
+python train_liger.py --config v2.1 --resume
 ```
 <img width="1800" height="900" alt="training_loss_curve" src="https://github.com/user-attachments/assets/61eb397e-0473-4fcd-8d9e-4c695a523e94" />
 
 Training configuration:
 
-- **Hardware**: Single NVIDIA RTX 3070 Ti (8GB VRAM)
-- **Effective batch size**: 262K tokens/step (batch 8 × grad accum 64 × block size 512)
-- **Optimizer**: AdamW with cosine decay schedule and warmup
-- **Mixed precision**: bfloat16 with `torch.compile` for speed
-- **Evaluation**: Periodic validation with sample text generation
-- **Checkpointing**: Automatic saves with train/val loss tracking
+| | TinyGPT2 (95M) | TinyGPT2.1 (183M) |
+|---|---|---|
+| **Dataset** | OpenWebText | FineWeb-Edu (streamed) |
+| **Tokens** | ~6.7B | ~8B |
+| **Optimizer** | AdamW | 8-bit AdamW (bitsandbytes) |
+| **Effective batch** | 262K tok/step | 262K tok/step |
+| **Grad checkpointing** | No | Yes |
+| **Mixed precision** | bfloat16 + torch.compile | bfloat16 + torch.compile |
+| **Hardware** | RTX 3070 Ti (8GB) | RTX 3070 Ti (8GB) |
 
 ### Supervised Fine-Tuning (SFT)
 
-Fine-tune TinyGPT2 on instruction-following tasks using the Stanford Alpaca dataset:
+Fine-tune TinyGPT2 on instruction-following tasks:
 
 ```bash
-# Fine-tune from a pretrained checkpoint
+# Alpaca dataset (52K instructions) — default config
 python sft.py --checkpoint checkpoints/ckpt_step25500.pth
+
+# SlimOrca dataset (500K instructions) — v2.1 config
+python sft.py --checkpoint checkpoints_v2.1/ckpt_step30000.pth --config v2.1 --dataset slimorca
 
 # Resume SFT training
 python sft.py --checkpoint checkpoints/ckpt_step25500.pth --resume
@@ -298,9 +364,7 @@ python sft.py --checkpoint checkpoints/ckpt_step25500.pth --resume
 SFT configuration:
 
 - **Hardware**: Single NVIDIA RTX 3070 Ti (8GB VRAM)
-- **Dataset**: Stanford Alpaca (52K instruction-response pairs, 90/10 train/val split)
-- **Epochs**: 3 (~85 minutes total)
-- **Effective batch size**: 16K tokens/step (batch 4 × grad accum 8 × block size 512)
+- **Datasets**: Stanford Alpaca (52K) or SlimOrca (500K instruction-response pairs)
 - **Response-only loss masking**: Only trains on the response portion, not the instruction prompt
 - **Prompt template**: `### Instruction: ... ### Input: ... ### Response: ...`
 
@@ -309,6 +373,31 @@ SFT configuration:
 | 1     | 2.13       | 2.01     | 8.45      | 7.44    |
 | 2     | 1.97       | 1.98     | 7.17      | 7.27    |
 | 3     | 1.91       | 1.98     | 6.77      | 7.26    |
+
+### DPO (Direct Preference Optimization)
+
+Align the SFT model with human preferences using Anthropic's HH-RLHF dataset:
+
+```bash
+# Run DPO on an SFT checkpoint
+python dpo.py --checkpoint checkpoints_sft/sft_epoch2.pth
+
+# With custom hyperparameters
+python dpo.py --checkpoint checkpoints_sft/sft_epoch2.pth --beta 0.05 --lr 5e-7 --epochs 1
+
+# TinyGPT2.1 model
+python dpo.py --checkpoint checkpoints_sft_v2.1/sft_epoch2.pth --config v2.1
+
+# Resume DPO training
+python dpo.py --checkpoint checkpoints_sft/sft_epoch2.pth --resume
+```
+
+DPO configuration:
+
+- **Dataset**: Anthropic HH-RLHF (~160K preference pairs)
+- **Method**: Trains a policy model against a frozen reference copy of the SFT model
+- **Key metric**: Reward accuracy — how often the model prefers the chosen response over rejected
+- **Emergency checkpointing**: Saves state on crash or Ctrl+C for safe resumability
 
 ### Training Optimizations 🚀
 
@@ -323,12 +412,15 @@ SFT configuration:
 #### TinyGPT2 Specific Optimizations
 
 - **torch.compile**: Full model compilation for fused kernel execution
-- **Grouped Query Attention (GQA)**: 12 query heads sharing 4 KV groups — reduces memory while maintaining quality
+- **Grouped Query Attention (GQA)**: Query heads sharing KV groups — reduces memory while maintaining quality
 - **Rotary Position Embeddings (RoPE)**: Efficient relative position encoding without learned position embeddings
 - **RMSNorm**: Faster and more stable alternative to LayerNorm
 - **KV Cache**: Efficient autoregressive generation — only computes attention for the new token
 - **Weight Tying**: Shares weights between token embeddings and output projection to reduce parameters
 - **Fused AdamW**: Uses CUDA-fused optimizer when available
+- **8-bit AdamW** (v2.1): Halves optimizer state memory via bitsandbytes
+- **Gradient Checkpointing** (v2.1): Trades compute for memory — enables larger models on limited VRAM
+- **Emergency Checkpointing**: Saves model state on crash or Ctrl+C across all training scripts
 
 #### MoE Specific Optimizations
 
@@ -345,13 +437,14 @@ tinygpt/
 │   ├── __init__.py           # Exports all models, configs, tokenizer
 │   ├── model.py              # GPTLanguageModel, MoEGPTLanguageModel, WikipediaMoEGPTLanguageModel, TinyGPT2
 │   ├── layers.py             # DecoderBlock, MoE blocks, GQA, RoPE, RMSNorm, TinyGPT2Block
-│   ├── config.py             # GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig, TinyGPT2Config
+│   ├── config.py             # GPTConfig, MoEGPTConfig, WikipediaMoEGPTConfig, TinyGPT2Config, TinyGPT2_1Config
 │   ├── tokenizer.py          # Tiktoken-based tokenizer
 │   ├── utils.py              # Generation utilities, mask helpers
 │   └── weights/              # Model weight files
-├── train_liger.py            # TinyGPT2 pretraining script (OpenWebText)
-├── sft.py                    # Supervised fine-tuning on Stanford Alpaca
-├── inference.py              # TinyGPT2 CLI inference with KV cache & instruction template
+├── train_liger.py            # TinyGPT2/2.1 pretraining (OpenWebText / FineWeb-Edu)
+├── sft.py                    # Supervised fine-tuning (Alpaca / SlimOrca)
+├── dpo.py                    # DPO preference alignment (Anthropic HH-RLHF)
+├── inference.py              # CLI inference — chat, instruction, and raw modes
 ├── main.py                   # Streamlit web UI (all models)
 ├── app.py                    # FastAPI REST API service
 ├── notebooks/                # Training notebooks
