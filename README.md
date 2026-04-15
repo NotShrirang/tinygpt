@@ -13,6 +13,7 @@
 🔗 **Quick Links:**
 
 - 🤗 [HuggingFace Repository](https://huggingface.co/NotShrirang/tinygpt)
+- 🤗 [TinyGPT2-IT (Instruction-Tuned)](https://huggingface.co/NotShrirang/tinygpt2-it)
 - 🚀 [Live Demo](https://tinygpt.streamlit.app/)
 - 📚 [Training Notebooks](./notebooks/)
 
@@ -202,7 +203,32 @@ Choose from multiple model variants:
 
 ### Quick Start Options
 
-#### Option 1: Streamlit Interface (Recommended for beginners)
+#### Option 1: Load from HuggingFace 🤗
+
+```python
+from transformers import AutoModelForCausalLM
+import tiktoken
+import torch
+
+# Load the instruction-tuned model
+model = AutoModelForCausalLM.from_pretrained(
+    "NotShrirang/tinygpt2-it",
+    trust_remote_code=True,
+)
+model.eval()
+
+# Tokenize and generate
+enc = tiktoken.get_encoding("gpt2")
+prompt = "### Instruction:\nWhat is the capital of France?\n\n### Response:\n"
+input_ids = torch.tensor([enc.encode(prompt)])
+
+with torch.no_grad():
+    output = model.generate(input_ids, max_new_tokens=128, do_sample=True, temperature=0.7, top_k=40)
+
+print(enc.decode(output[0].tolist()))
+```
+
+#### Option 2: Streamlit Interface (Recommended for beginners)
 
 ```bash
 streamlit run main.py
@@ -215,7 +241,7 @@ This launches a web application where you can:
 - Input text prompts and see real-time streaming responses
 - Download models automatically from Hugging Face
 
-#### Option 2: CLI Inference (TinyGPT2)
+#### Option 3: CLI Inference (TinyGPT2)
 
 ```bash
 # Chat mode (default) — multi-turn conversation with memory
@@ -269,7 +295,7 @@ Features:
 | `/load <path>` | Load a different checkpoint |
 | `/quit` | Exit |
 
-#### Option 3: FastAPI Service (Production REST API)
+#### Option 4: FastAPI Service (Production REST API)
 
 ```bash
 # Start FastAPI server directly
@@ -288,7 +314,7 @@ Features:
 
 For detailed API documentation, see `docs/API.md`.
 
-#### Option 4: Docker (Recommended for production)
+#### Option 5: Docker (Recommended for production)
 
 ```bash
 # Production deployment

@@ -180,3 +180,4 @@ checkpoints*/
 # Metrics plots
 plot_metrics.py
 training_loss_curve.png
+hf_model_sft/
