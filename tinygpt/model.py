@@ -264,7 +264,12 @@ class TinyGPT2(nn.Module):
         self.config = config
         self.block_size = config.block_size
         self.gradient_checkpointing = False
-        self.loss_fn = nn.CrossEntropyLoss(ignore_index=pad_id)
+        self.use_fused_loss = LigerFusedLinearCrossEntropyLoss is not None
+
+        if self.use_fused_loss:
+            self.loss_fn = LigerFusedLinearCrossEntropyLoss(ignore_index=pad_id)
+        else:
+            self.loss_fn = nn.CrossEntropyLoss(ignore_index=pad_id)
         self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
 
         self.blocks = nn.ModuleList([TinyGPT2Block(config) for _ in range(config.n_layer)])
@@ -311,13 +316,18 @@ class TinyGPT2(nn.Module):
             new_kv_caches.append(new_cache)
 
         x = self.ln_f(x)
-        logits = self.lm_head(x)
 
         loss = None
-        if targets is not None:
-            logits = logits.view(-1, self.config.vocab_size)
-            targets = targets.view(-1)
-            loss = self.loss_fn(logits, targets)
+        if targets is not None and self.use_fused_loss and self.training:
+            # Fused linear + cross-entropy: skip materializing the full logits tensor
+            loss = self.loss_fn(self.lm_head.weight, x.view(-1, self.config.n_embd), targets.view(-1))
+            logits = None  # Not needed during training
+        else:
+            logits = self.lm_head(x)
+            if targets is not None:
+                logits_flat = logits.view(-1, self.config.vocab_size)
+                targets_flat = targets.view(-1)
+                loss = self.loss_fn(logits_flat, targets_flat)
 
         return logits, loss, new_kv_caches
 

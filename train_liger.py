@@ -21,6 +21,7 @@ from tinygpt.layers import USE_LIGER_RMS as USE_LIGER
 
 torch.set_float32_matmul_precision('high')
 torch.cuda.empty_cache()
+torch.backends.cudnn.benchmark = True
 
 # Random validation prompts pool
 EVAL_PROMPTS = [
@@ -182,7 +183,7 @@ def prepare_data(config):
     train_loader = DataLoader(
         ds, batch_size=config.batch_size,
         collate_fn=lambda batch: collate_fn(batch, config.block_size),
-        num_workers=0, pin_memory=True
+        num_workers=2, pin_memory=True, persistent_workers=True
     )
 
     return train_loader
@@ -271,7 +272,7 @@ def train(resume=False, config_name="default"):
     val_loader = DataLoader(
         val_ds, batch_size=config.batch_size,
         collate_fn=lambda batch: collate_fn(batch, config.block_size),
-        num_workers=0, pin_memory=True
+        num_workers=2, pin_memory=True, persistent_workers=True
     )
     val_iter = iter(val_loader)
 
@@ -342,7 +343,7 @@ def train(resume=False, config_name="default"):
     start_time = time.time()
     micro_step = 0
     opt_step = start_opt_step
-    running_loss = 0.0
+    running_loss = torch.tensor(0.0, device=config.device)
 
     def save_checkpoint(step, loss_val=None, val_loss_val=None, emergency=False):
         """Save a checkpoint. Used for regular saves and emergency exits."""
@@ -377,7 +378,8 @@ def train(resume=False, config_name="default"):
             if batch is None:
                 continue
 
-            t0 = time.time()
+            if micro_step % config.gradient_accumulation_steps == 0:
+                t0 = time.time()
 
             inputs = batch['input'].to(config.device, non_blocking=True)
             targets = batch['target'].to(config.device, non_blocking=True)
@@ -388,14 +390,9 @@ def train(resume=False, config_name="default"):
             with torch.autocast(device_type=config.device, dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
                 _, loss, _ = model(inputs, targets)
 
-            original_loss = loss.item()
-            running_loss += original_loss
+            running_loss += loss.detach()
             loss = loss / config.gradient_accumulation_steps
             loss.backward()
-
-            train_losses.append(original_loss)
-            if len(train_losses) > 10000:
-                train_losses = train_losses[-5000:]
 
             micro_step += 1
 
@@ -408,8 +405,9 @@ def train(resume=False, config_name="default"):
                 opt_step += 1
                 pbar.update(1)
 
-                avg_micro_loss = running_loss / config.gradient_accumulation_steps
-                running_loss = 0.0
+                avg_micro_loss = (running_loss / config.gradient_accumulation_steps).item()  # single sync per opt step
+                running_loss = torch.tensor(0.0, device=config.device)
+                train_losses.append(avg_micro_loss)
 
                 t1 = time.time()
                 tokens_per_sec = (num_tokens * config.gradient_accumulation_steps) / max(t1 - t0, 1e-6)
